@@ -97,18 +97,30 @@ export default function Login() {
           </form>
 
           <div className="mt-6">
-            <div className="flex items-center gap-2 mb-2.5">
-              <AlertTriangle size={11} className="text-amber-500" />
-              <span className="text-[10.5px] font-semibold text-zinc-500 uppercase tracking-wide">Demo credentials — environment only</span>
+            <div className="flex items-center gap-1.5 mb-2.5">
+              <AlertTriangle size={12} className="text-amber-500" />
+              <span className="text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">Demo Credentials — One-click Login</span>
             </div>
-            <div className="card divide-y divide-zinc-100">
+            <div className="bg-white border border-zinc-200/90 rounded-xl divide-y divide-zinc-100 shadow-sm overflow-hidden">
               {DEMO_USERS.map((d) => (
-                <button key={d.email} className="w-full flex items-center justify-between px-3 py-2 hover:bg-zinc-50 cursor-pointer text-left" onClick={() => { setEmail(d.email); setPassword("demo1234"); }}>
+                <button
+                  key={d.email}
+                  type="button"
+                  className="w-full flex items-center justify-between px-3.5 py-2.5 hover:bg-zinc-50/80 active:bg-zinc-100 transition-colors text-left group cursor-pointer"
+                  onClick={() => {
+                    setEmail(d.email);
+                    setPassword("demo1234");
+                  }}
+                >
                   <div>
-                    <div className="text-[12px] font-medium text-zinc-800">{d.label} · <span className="text-zinc-500 font-normal">{d.email}</span></div>
-                    <div className="text-[10.5px] text-zinc-400">{d.desc}</div>
+                    <div className="text-[12.5px] font-semibold text-zinc-900 group-hover:text-brand-600 transition-colors">
+                      {d.label} <span className="text-zinc-400 font-normal">· {d.email}</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-500 mt-0.5">{d.desc}</div>
                   </div>
-                  <span className="text-[10px] text-zinc-400 font-mono">demo1234</span>
+                  <span className="text-[11px] text-zinc-400 font-mono bg-zinc-50 group-hover:bg-brand-50 group-hover:text-brand-600 px-2 py-0.5 rounded border border-zinc-200/60 transition-colors">
+                    demo1234
+                  </span>
                 </button>
               ))}
             </div>
