@@ -38,7 +38,7 @@ export async function refreshLoanState(loanId: number) {
   const status = loan.written_off ? "written_off" : loan.status === "closed" ? "closed" : due.missedInstallments > 0 ? "overdue" : loan.status === "restructured" ? "restructured" : "active";
   await run(
     "UPDATE loans SET dpd = ?, npa_class = ?, status = ?, outstanding = ?, updated_at = datetime('now') WHERE id = ?",
-    [due.missedInstallments, npaClass, status, sum.unpaid_principal, loanId]
+    [due.missedInstallments, npaClass, status, sum?.unpaid_principal ?? 0, loanId]
   );
 }
 
@@ -137,18 +137,18 @@ lmsRouter.post("/loans/:id/payment", requirePerm("payments.record"), asyncH(asyn
   const loan = await q1<Record<string, any>>("SELECT * FROM loans WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
   if (!loan) { res.status(404).json({ error: "Loan not found" }); return; }
   if (loan.status === "closed" || loan.written_off) { res.status(400).json({ error: "Loan is closed/written off" }); return; }
-  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id])!;
+  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id]);
   const insts = await q<Record<string, any>>("SELECT * FROM installments WHERE loan_id = ? ORDER BY seq", [loan.id]);
 
   // Configurable allocation order from product policy
-  const order = (product.allocation_order || "penalty,fees,interest,principal").split(",") as AllocationComponent[];
+  const order = ((product?.allocation_order || "penalty,fees,interest,principal") as string).split(",") as AllocationComponent[];
   const alloc = allocatePayment({
     amount: body.amount,
     order,
     penalDue: loan.penal_due,
     feesDue: loan.fees_due,
     installments: insts.map((i) => ({ seq: i.seq, total: i.total, paidAmount: i.paid_amount, interest: i.interest, principal: i.principal })),
-    allowFuturePrincipal: !!product.prepayment_allowed
+    allowFuturePrincipal: !!product?.prepayment_allowed
   });
 
   const receiptNo = "RCT" + new Date().getFullYear().toString().slice(2) + String(Math.floor(100000 + Math.random() * 899999));
@@ -252,13 +252,14 @@ lmsRouter.post("/loans/:id/foreclosure", requirePerm("payments.record"), asyncH(
   const loan = await q1<Record<string, any>>("SELECT * FROM loans WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
   if (!loan) { res.status(404).json({ error: "Loan not found" }); return; }
   const insts = await q<Record<string, any>>("SELECT * FROM installments WHERE loan_id = ? ORDER BY seq", [loan.id]);
-  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id])!;
+  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id]);
+  const forePct = product?.foreclosure_charge_pct || 3;
   const quote = foreclosureQuote(
     { principal: loan.principal, rate: loan.rate, outstanding: loan.outstanding, penalDue: loan.penal_due, feesDue: loan.fees_due },
     insts.map((i) => ({ seq: i.seq, dueDate: i.due_date, principal: i.principal, interest: i.interest, paid: i.paid, paidAmount: i.paid_amount })),
-    today(), { foreclosureChargePct: product.foreclosure_charge_pct || 3 }
+    today(), { foreclosureChargePct: forePct }
   );
-  res.json({ quote, allowed: !!product.prepayment_allowed });
+  res.json({ quote, allowed: !!product?.prepayment_allowed });
 }));
 
 lmsRouter.post("/loans/:id/foreclose", requirePerm("payments.record"), asyncH(async (req: AuthedRequest, res) => {
@@ -266,11 +267,12 @@ lmsRouter.post("/loans/:id/foreclose", requirePerm("payments.record"), asyncH(as
   const loan = await q1<Record<string, any>>("SELECT * FROM loans WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
   if (!loan) { res.status(404).json({ error: "Loan not found" }); return; }
   const insts = await q<Record<string, any>>("SELECT * FROM installments WHERE loan_id = ? ORDER BY seq", [loan.id]);
-  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id])!;
+  const product2 = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id]);
+  const forePct2 = product2?.foreclosure_charge_pct || 3;
   const quote = foreclosureQuote(
     { principal: loan.principal, rate: loan.rate, outstanding: loan.outstanding, penalDue: loan.penal_due, feesDue: loan.fees_due },
     insts.map((i) => ({ seq: i.seq, dueDate: i.due_date, principal: i.principal, interest: i.interest, paid: i.paid, paidAmount: i.paid_amount })),
-    today(), { foreclosureChargePct: product.foreclosure_charge_pct || 3 }
+    today(), { foreclosureChargePct: forePct2 }
   );
   if (body.amount < quote.finalPayable) {
     res.status(400).json({ error: `Amount below foreclosure quote (${inrShort(quote.finalPayable)})` });

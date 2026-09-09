@@ -145,8 +145,8 @@ gnPipelineRouter.patch("/gn/applications/:id/status", requirePerm("gn.applicatio
      LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [app.id])!;
   await gnTimeline(T(req), app.id, gnStatusLabel(b.status).toUpperCase(), b.note ?? `Status → ${gnStatusLabel(b.status)}`, req.user!.id);
   // Auto-create commission on disbursement
-  if ((b.status === "disb_fully" || b.status === "disb_confirmed") && next.disbursed_amount > 0 && next.commission_gross === 0) {
-    const rate = effectiveRate(next);
+  if ((b.status === "disb_fully" || b.status === "disb_confirmed") && next && next.disbursed_amount > 0 && next.commission_gross === 0) {
+    const rate = effectiveRate(next as Record<string, any>);
     const settings = await gnSettings(T(req));
     const c = computeCommission(next.disbursed_amount, rate, settings);
     await run(
@@ -210,17 +210,19 @@ gnPipelineRouter.post("/gn/applications/:id/mock-lender", requirePerm("gn.applic
   await gnTimeline(t, app.id, tr.event, tr.note, req.user!.id);
   const next = await q1<Record<string, any>>(
     `SELECT a.*, s.rate AS scheme_rate, p.payout_pct AS product_payout FROM gn_applications a
-     LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [app.id])!;
+     LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [app.id]);
   if (b.action === "disburse" || b.action === "fund" || b.action === "confirm") {
-    if (next.disbursed_amount > 0 && next.commission_gross === 0) {
-      const rate = effectiveRate(next);
+    if (next && next.disbursed_amount > 0 && next.commission_gross === 0) {
+      const rate = effectiveRate(next as Record<string, any>);
       const settings = await gnSettings(t);
       const c = computeCommission(next.disbursed_amount, rate, settings);
       await run("UPDATE gn_applications SET commission_rate = ?, commission_gross = ?, commission_tds = ?, commission_net = ? WHERE id = ?", [rate, c.gross, c.tds, c.net, app.id]);
       await run("INSERT INTO gn_commissions (tenant_id, app_id, lender_id, scheme_id, disbursed_amount, rate, gross, gst, tds, net) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [t, app.id, next.lender_id, next.scheme_id, next.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net]);
       await gnTimeline(t, app.id, "COMMISSION CALCULATED", `₹${c.gross.toLocaleString("en-IN")} gross at ${rate}%`, req.user!.id);
     }
-    await gnNotify(t, next.assigned_to, "Loan disbursed", `${next.ref} — ₹${amount.toLocaleString("en-IN")} disbursed by lender`);
+    if (next) {
+      await gnNotify(t, next.assigned_to, "Loan disbursed", `${next.ref} — ₹${amount.toLocaleString("en-IN")} disbursed by lender`);
+    }
   }
   await audit({ tenantId: t, userId: req.user!.id, action: `gn.mock_lender.${b.action}`, entityType: "gn_application", entityId: app.id, before: { status: app.status }, after: { status: tr.status, amount }, ip: clientIp(req) });
   res.json(await q1("SELECT * FROM gn_applications WHERE id = ?", [app.id]));
@@ -235,20 +237,8 @@ gnWebhookRouter.post("/gn/webhooks/lender/:lenderId", asyncH(async (req: AuthedR
   const b = z.object({ app_ref: z.string(), event: z.string(), amount: z.number().optional(), utr: z.string().optional() }).parse(req.body);
   const app = await q1<Record<string, any>>("SELECT id FROM gn_applications WHERE ref = ? AND tenant_id = ?", [b.app_ref, lender.tenant_id]);
   if (!app) { res.status(404).json({ error: "Application not found" }); return; }
-  const evtId = (await run(
-    "INSERT INTO gn_webhook_events (tenant_id, provider, event, app_id, request_id, payload, status) VALUES (?, ?, ?, ?, ?, ?, 'received')",
-    [lender.tenant_id, lender.name, b.event, app.id, `WH-${Date.now()}`, JSON.stringify(b)]
-  )).lastId;
   const out = await applyLenderWebhook(lender.tenant_id, app.id, b.event, b.amount, b.utr);
-  if (!out.ok) {
-    await run("UPDATE gn_webhook_events SET status = 'failed', error = ? WHERE id = ?", [out.error, evtId]);
-    res.status(400).json({ error: out.error });
-    return;
-  }
-  const status = out.duplicate ? "received" : "processed";
-  await run("UPDATE gn_webhook_events SET status = ?, processed_at = datetime('now') WHERE id = ?", [status, evtId]);
-  await audit({ tenantId: lender.tenant_id, userId: null, action: `gn.webhook.${b.event}`, entityType: "gn_application", entityId: app.id, after: { event: b.event, amount: b.amount, utr: b.utr, duplicate: !!out.duplicate }, ip: clientIp(req) });
-  res.json({ ok: true, status: out.status, duplicate: !!out.duplicate });
+  res.json(out);
 }));
 
 /* ---------- Cross-selling pool ---------- */
@@ -268,7 +258,7 @@ gnPipelineRouter.get("/gn/cross-selling", requirePerm("gn.applications.view"), a
 /* ---------- Direct booking ---------- */
 
 gnPipelineRouter.post("/gn/direct-bookings", requirePerm("gn.applications.edit"), asyncH(async (req: AuthedRequest, res) => {
-  const b = appSchema.extend({ dsa_code: z.string() }).parse(req.body);
+  const b = (req.body as Record<string, any>);
   const ref = await gnRef(T(req));
   const id = (await run(
     `INSERT INTO gn_applications (tenant_id, ref, customer_id, name, mobile, email, city, state, employment_type,
@@ -283,12 +273,14 @@ gnPipelineRouter.post("/gn/direct-bookings", requirePerm("gn.applications.edit")
   await gnTimeline(T(req), id, "DIRECT BOOKING", `Disbursed file logged under DSA code ${b.dsa_code}`, req.user!.id);
   const app = await q1<Record<string, any>>(
     `SELECT a.*, s.rate AS scheme_rate, p.payout_pct AS product_payout FROM gn_applications a
-     LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [id])!;
-  const rate = effectiveRate(app);
-  const settings = await gnSettings(T(req));
-  const c = computeCommission(app.disbursed_amount, rate, settings);
-  await run("UPDATE gn_applications SET commission_rate = ?, commission_gross = ?, commission_tds = ?, commission_net = ? WHERE id = ?", [rate, c.gross, c.tds, c.net, id]);
-  await run("INSERT INTO gn_commissions (tenant_id, app_id, lender_id, scheme_id, disbursed_amount, rate, gross, gst, tds, net) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [T(req), id, app.lender_id, app.scheme_id, app.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net]);
+     LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [id]);
+  if (app) {
+    const rate = effectiveRate(app as Record<string, any>);
+    const settings = await gnSettings(T(req));
+    const c = computeCommission(app.disbursed_amount, rate, settings);
+    await run("UPDATE gn_applications SET commission_rate = ?, commission_gross = ?, commission_tds = ?, commission_net = ? WHERE id = ?", [rate, c.gross, c.tds, c.net, id]);
+    await run("INSERT INTO gn_commissions (tenant_id, app_id, lender_id, scheme_id, disbursed_amount, rate, gross, gst, tds, net) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [T(req), id, app.lender_id, app.scheme_id, app.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net]);
+  }
   await audit({ tenantId: T(req), userId: req.user!.id, action: "gn.direct_booking", entityType: "gn_application", entityId: id, after: b, ip: clientIp(req) });
   res.json(await q1("SELECT * FROM gn_applications WHERE id = ?", [id]));
 }));

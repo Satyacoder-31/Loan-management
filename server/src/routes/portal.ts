@@ -149,9 +149,9 @@ portalRouter.post("/portal/loans/:id/pay", asyncH(async (req: AuthedRequest, res
   const loan = await q1<Record<string, any>>("SELECT * FROM loans WHERE id = ? AND customer_id = ?", [req.params.id, me.id]);
   if (!loan) { res.status(404).json({ error: "Loan not found" }); return; }
   if (loan.status === "closed" || loan.written_off) { res.status(400).json({ error: "Loan is closed" }); return; }
-  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id])!;
+  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id]);
   const insts = await q<Record<string, any>>("SELECT * FROM installments WHERE loan_id = ? ORDER BY seq", [loan.id]);
-  const order = (product.allocation_order || "penalty,fees,interest,principal").split(",") as AllocationComponent[];
+  const order = ((product?.allocation_order || "penalty,fees,interest,principal") as string).split(",") as AllocationComponent[];
   const alloc = allocatePayment({
     amount: body.amount, order, penalDue: loan.penal_due, feesDue: loan.fees_due,
     installments: insts.map((i) => ({ seq: i.seq, total: i.total, paidAmount: i.paid_amount, interest: i.interest, principal: i.principal })),

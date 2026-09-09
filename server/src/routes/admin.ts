@@ -247,14 +247,14 @@ provider: z.string().optional()
 const before = await q1<Record<string, any>>("SELECT * FROM integrations WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
 if (!before) { res.status(404).json({ error: "Integration not found" }); return; }
 const adapter = CATALOG_BY_CODE.get(before.code);
-const cfg = parseRowConfig(before);
+const cfg = parseRowConfig(before as any);
 const mode = body.mode ?? (cfg.mode === "live" ? "live" : "mock");
 const config = { ...cfg, mode, sandbox: mode !== "live" };
 const provider = body.mode === "live" ? "DIGITAP" : (body.provider ?? `MOCK-${before.code.toUpperCase()}`);
 await run("UPDATE integrations SET status = ?, provider = ?, config = ? WHERE id = ?",
 [mode === "live" ? "sandbox" : "sandbox", provider, JSON.stringify(config), before.id]);
 await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `admin.integration_${mode}`, entityType: "integration", entityId: before.id, before, after: { mode, adapter: adapter?.name }, ip: clientIp(req) });
-res.json(buildIntegrationView({ ...before, status: "sandbox", provider, config: JSON.stringify(config) }));
+res.json(buildIntegrationView({ ...before, status: "sandbox", provider, config: JSON.stringify(config) } as any));
 }));
 /** Test an adapter end-to-end. PAN Basic probes Digitap live (never billable);
  * suites Digitap has not enabled yet report exactly that, without a network call. */
@@ -275,7 +275,7 @@ outcome = { ok: false, message: `Awaiting Digitap enablement — ${adapter.digit
 } else {
 outcome = { ok: false, message: "Adapter suite not yet wired to a live driver." };
 }
-const cfg = parseRowConfig(row);
+const cfg = parseRowConfig(row as any);
 const config = { ...cfg, lastTest: new Date().toISOString(), lastTestOk: outcome.ok, lastTestMessage: outcome.message };
 await run("UPDATE integrations SET config = ?, status = ? WHERE id = ?",
 [JSON.stringify(config), outcome.ok ? (adapter.excluded ? row.status : "connected") : "error", row.id]);

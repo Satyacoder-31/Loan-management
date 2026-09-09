@@ -332,16 +332,18 @@ export async function setAppStatus(t: number, appId: number, status: string, use
   if ((status === "disb_fully" || status === "disb_confirmed") && app.disbursed_amount > 0 && app.commission_gross === 0) {
     const next = await q1<Record<string, any>>(
       `SELECT a.*, s.rate AS scheme_rate, p.payout_pct AS product_payout FROM gn_applications a
-       LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [appId])!;
-    const rate = effectiveRate(next);
-    const settings = await gnSettings(t);
-    const c = computeCommission(next.disbursed_amount, rate, settings);
-    await run("UPDATE gn_applications SET commission_rate = ?, commission_gross = ?, commission_tds = ?, commission_net = ? WHERE id = ?", [rate, c.gross, c.tds, c.net, appId]);
-    await run("INSERT INTO gn_commissions (tenant_id, app_id, lender_id, scheme_id, disbursed_amount, rate, gross, gst, tds, net, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'earned')",
-      [t, appId, next.lender_id, next.scheme_id, next.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net]);
-    await gnTimeline(t, appId, "COMMISSION CALCULATED", `₹${c.gross.toLocaleString("en-IN")} gross at ${rate}%`, userId);
+       LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id WHERE a.id = ?`, [appId]);
+    if (next) {
+      const rate = effectiveRate(next);
+      const settings = await gnSettings(t);
+      const c = computeCommission(next.disbursed_amount, rate, settings);
+      await run("UPDATE gn_applications SET commission_rate = ?, commission_gross = ?, commission_tds = ?, commission_net = ? WHERE id = ?", [rate, c.gross, c.tds, c.net, appId]);
+      await run("INSERT INTO gn_commissions (tenant_id, app_id, lender_id, scheme_id, disbursed_amount, rate, gross, gst, tds, net, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'earned')",
+        [t, appId, next.lender_id, next.scheme_id, next.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net]);
+      await gnTimeline(t, appId, "COMMISSION CALCULATED", `₹${c.gross.toLocaleString("en-IN")} gross at ${rate}%`, userId);
+    }
   }
-  return await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId])!;
+  return (await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId])) || app;
 }
 
 export async function submitApplication(t: number, appId: number, userId: number) {
@@ -407,24 +409,26 @@ export async function simulateLender(t: number, appId: number, action: "underwri
         `SELECT a.*, s.rate AS scheme_rate, p.payout_pct AS product_payout, c.id AS commission_id, c.gross AS comm_gross, c.gst AS comm_gst, c.tds AS comm_tds, c.net AS comm_net
          FROM gn_applications a LEFT JOIN gn_schemes s ON s.id = a.scheme_id LEFT JOIN gn_products p ON p.id = a.product_id
          LEFT JOIN gn_commissions c ON c.app_id = a.id
-         WHERE a.id = ?`, [appId])!;
-      const rate = effectiveRate(row);
-      const settings = await gnSettings(t);
-      const c = computeCommission(row.disbursed_amount, rate, settings);
-      const partnerSplit = settings.partner_split_pct ?? 60;
-      if (applicant) {
-        await run(
-          `INSERT INTO gn_payouts (tenant_id, applicant_id, app_id, disbursed_amount, rate, gross, gst, tds, net, partner_split_pct, partner_share, gn_share, status, received_at, utr)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', datetime('now'), ?)`,
-          [t, applicant.id, appId, row.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net, partnerSplit,
-            Math.round((c.net * partnerSplit) / 100), c.net - Math.round((c.net * partnerSplit) / 100),
-            opts.utr ?? `UTR-DEMO-${String(100000000 + Math.floor(Math.random() * 900000000))}`]
-        );
+         WHERE a.id = ?`, [appId]);
+      if (row) {
+        const rate = effectiveRate(row);
+        const settings = await gnSettings(t);
+        const c = computeCommission(row.disbursed_amount, rate, settings);
+        const partnerSplit = settings.partner_split_pct ?? 60;
+        if (applicant) {
+          await run(
+            `INSERT INTO gn_payouts (tenant_id, applicant_id, app_id, disbursed_amount, rate, gross, gst, tds, net, partner_split_pct, partner_share, gn_share, status, received_at, utr)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', datetime('now'), ?)`,
+            [t, applicant.id, appId, row.disbursed_amount, rate, c.gross, c.gst, c.tds, c.net, partnerSplit,
+              Math.round((c.net * partnerSplit) / 100), c.net - Math.round((c.net * partnerSplit) / 100),
+              opts.utr ?? `UTR-DEMO-${String(100000000 + Math.floor(Math.random() * 900000000))}`]
+          );
+        }
+        await run("UPDATE gn_commissions SET status = 'received', received_at = datetime('now') WHERE app_id = ? AND status = 'earned'", [appId]);
+        await run("UPDATE gn_applications SET status = 'payout_received', stage = 'completed', updated_at = datetime('now') WHERE id = ?", [appId]);
+        next = (await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId])) || next;
+        await gnTimeline(t, appId, "PAYOUT RECEIVED", `₹${c.net.toLocaleString("en-IN")} net payout tracked`, userId);
       }
-      await run("UPDATE gn_commissions SET status = 'received', received_at = datetime('now') WHERE app_id = ? AND status = 'earned'", [appId]);
-      await run("UPDATE gn_applications SET status = 'payout_received', stage = 'completed', updated_at = datetime('now') WHERE id = ?", [appId]);
-      next = await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId])!;
-      await gnTimeline(t, appId, "PAYOUT RECEIVED", `₹${c.net.toLocaleString("en-IN")} net payout tracked`, userId);
       break;
     }
   }
@@ -473,15 +477,15 @@ export async function runFullPipeline(t: number, applicantId: number, userId: nu
   await run("UPDATE gn_documents SET status = 'verified', verified_at = datetime('now') WHERE tenant_id = ? AND entity_type = 'application' AND entity_id = ?", [t, appId]);
   await submitApplication(t, appId, userId);
   await simulateLender(t, appId, "underwrite", userId);
-  await simulateLender(t, appId, "approve", userId, { amount: a.loan_amount ?? match.max_amount ?? 0 });
+  await simulateLender(t, appId, "approve", userId, { amount: a.loan_amount ?? match?.max_amount ?? 0 });
   await simulateLender(t, appId, "agreement", userId);
-  await simulateLender(t, appId, "disburse", userId, { amount: a.loan_amount ?? match.max_amount ?? 0 });
-  await simulateLender(t, appId, "fund", userId, { amount: a.loan_amount ?? match.max_amount ?? 0 });
+  await simulateLender(t, appId, "disburse", userId, { amount: a.loan_amount ?? match?.max_amount ?? 0 });
+  await simulateLender(t, appId, "fund", userId, { amount: a.loan_amount ?? match?.max_amount ?? 0 });
   await simulateLender(t, appId, "confirm", userId);
   await simulateLender(t, appId, "payout", userId);
-  const app = await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId])!;
+  const app = await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [appId]);
   await run("UPDATE gn_applicants SET doc_status = 'completed', app_status = 'payout', updated_at = datetime('now') WHERE id = ?", [applicantId]);
-  return { appId, ref: app.ref, status: app.status, applicantStatus: "payout" };
+  return { appId, ref: app?.ref ?? "", status: app?.status ?? "", applicantStatus: "payout" };
 }
 
 /* ================= Demo scenario ================= */
@@ -556,8 +560,8 @@ export async function applyLenderWebhook(tenantId: number, appId: number, event:
   await gnTimeline(tenantId, app.id, tr.event, tr.note + (utr ? ` · UTR ${utr}` : ""), null);
   const applicant = await q1<Record<string, any>>("SELECT * FROM gn_applicants WHERE id = ?", [app.applicant_id ?? null]);
   if (event === "DISBURSEMENT_COMPLETED") {
-    const next = await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [app.id])!;
-    if (next.disbursed_amount > 0 && next.commission_gross === 0) {
+    const next = await q1<Record<string, any>>("SELECT * FROM gn_applications WHERE id = ?", [app.id]);
+    if (next && next.disbursed_amount > 0 && next.commission_gross === 0) {
       const rate = effectiveRate(next);
       const settings = await gnSettings(tenantId);
       const c = computeCommission(next.disbursed_amount, rate, settings);
@@ -663,7 +667,12 @@ export async function processBulkBatch(t: number, batchId: number, userId: numbe
       await job(t, batchId, "credit", row.id, applicantId, null, "completed", userId, null, "Demo Credit Provider");
 
       // Match (demo — 10% no match)
-      const matches = await matchApplicant(t, await q1("SELECT * FROM gn_applicants WHERE id = ?", [applicantId])!);
+      const applicantRow = await q1<Record<string, any>>("SELECT * FROM gn_applicants WHERE id = ?", [applicantId]);
+      if (!applicantRow) {
+        errors++;
+        continue;
+      }
+      const matches = await matchApplicant(t, applicantRow);
       if (!matches.length || rng() < 0.1) {
         await run("UPDATE gn_applicants SET match_status = 'no_match', app_status = 'submitted', updated_at = datetime('now') WHERE id = ?", [applicantId]);
         await run("UPDATE gn_bulk_rows SET status = 'failed', error = 'No eligible lender match' WHERE id = ?", [row.id]);
@@ -685,7 +694,7 @@ export async function processBulkBatch(t: number, batchId: number, userId: numbe
         errors++;
         continue;
       }
-      const appId = await createApplication(t, await q1("SELECT * FROM gn_applicants WHERE id = ?", [applicantId])!, { lender_id: best.lender_id ?? undefined, product_id: best.product_id ?? undefined, scheme_id: best.scheme_id }, userId);
+      const appId = await createApplication(t, applicantRow, { lender_id: best.lender_id ?? undefined, product_id: best.product_id ?? undefined, scheme_id: best.scheme_id }, userId);
       await run("UPDATE gn_documents SET status = 'verified', verified_at = datetime('now') WHERE tenant_id = ? AND entity_type = 'application' AND entity_id = ?", [t, appId]);
       await run("UPDATE gn_bulk_rows SET status = 'app_created', application_id = ? WHERE id = ?", [appId, row.id]);
       await job(t, batchId, "application", row.id, applicantId, appId, "completed", userId, null, null);

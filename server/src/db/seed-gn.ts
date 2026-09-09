@@ -817,7 +817,7 @@ async function seedCommandCenter(tenantId: number, rng: GnRng, userIds: number[]
     { name: "Vikram Singh", mobile: "9822001104", pan: "BMJPV4567D", dob: "1993-09-30", city: "Delhi", state: "Delhi", employment_type: "Self-employed", business_name: "Vikram Logistics", business_vintage: 4, annual_turnover: 14000000, monthly_income: 120000, loan_type: "Vehicle Loan", loan_amount: 600000, tenure: 48, stage: "docs", gender: "Male" },
     { name: "Pooja Iyer", mobile: "9822001105", pan: "BMJPI5678E", dob: "1985-01-12", city: "Chennai", state: "Tamil Nadu", employment_type: "Business Owner", business_name: "Iyer Constructions", business_vintage: 11, annual_turnover: 88000000, monthly_income: 650000, loan_type: "Loan Against Property", loan_amount: 4000000, tenure: 120, stage: "approved", gender: "Female" },
     { name: "Rohit Verma", mobile: "9822001106", pan: "BMJPR6789F", dob: "1991-07-25", city: "Lucknow", state: "Uttar Pradesh", employment_type: "Self-employed", business_name: "Verma Trading Co", business_type: "Trading", business_vintage: 3, annual_turnover: 19000000, monthly_income: 160000, loan_type: "Business Loan", loan_amount: 1800000, tenure: 36, stage: "app", gender: "Male" },
-    { name: "Kavita Joshi", mobile: "9822001107", pan: "BMJPR7890G", dob: "1995-12-05", city: "Pune", state: "Maharashtra", employment_type: "Salaried", employer: "Infosys Ltd", monthly_income: 72000, loan_type: "Personal Loan", loan_amount: 500000, tenure: 24, stage: "kyc", gender: "Female" },
+{ name: "Kavita Joshi", mobile: "9822001107", pan: "BMJPR7890G", dob: "1995-12-05", city: "Pune", state: "Maharashtra", employment_type: "Salaried", employer: "Infosys Ltd", monthly_income: 72000, loan_type: "Personal Loan", loan_amount: 500000, tenure: 24, stage: "kyc", gender: "Female" },
     { name: "Arjun Nair", mobile: "9822001108", pan: "BMJPN8901H", dob: "1994-04-18", city: "Kochi", state: "Kerala", employment_type: "Business Owner", business_name: "Nair Engineering", business_vintage: 2, annual_turnover: 12000000, monthly_income: 95000, loan_type: "Equipment Loan", loan_amount: 3000000, tenure: 60, stage: "consent", gender: "Male" },
     { name: "Neha Gupta", mobile: "9822001109", pan: "BMJPG9012I", dob: "1989-08-08", city: "Jaipur", state: "Rajasthan", employment_type: "Self-employed", business_name: "Gupta Jewellers", business_vintage: 7, annual_turnover: 45000000, monthly_income: 380000, loan_type: "Home Loan", loan_amount: 3500000, tenure: 240, stage: "rejected", gender: "Female" },
     { name: "Sanjay Das", mobile: "9822001110", pan: "BMJPS0123J", dob: "1982-02-27", city: "Kolkata", state: "West Bengal", employment_type: "Business Owner", business_name: "Das Agro Industries", business_type: "Manufacturing", business_vintage: 13, annual_turnover: 96000000, monthly_income: 720000, loan_type: "Business Loan", loan_amount: 5000000, tenure: 60, stage: "payout", gender: "Male" },
@@ -838,7 +838,8 @@ async function seedCommandCenter(tenantId: number, rng: GnRng, userIds: number[]
         s.loan_type === "Home Loan" || s.loan_type === "Loan Against Property" ? "Asset purchase" : "Business / personal requirement",
         String(501001000000 + s.loan_amount % 9000000), uid]
     )).lastId;
-    const a = await q1<Record<string, any>>("SELECT * FROM gn_applicants WHERE id = ?", [id])!;
+    const a = await q1<Record<string, any>>("SELECT * FROM gn_applicants WHERE id = ?", [id]);
+    if (!a) continue;
     coCount++;
     if (s.stage === "consent") {
       await aplEventSeed(t, id, "CONSENT REQUIRED", "Consent request ready to send");
@@ -879,7 +880,6 @@ async function seedCommandCenter(tenantId: number, rng: GnRng, userIds: number[]
     coDisbursed += s.loan_amount;
     if (s.stage === "disb") { await aplEventSeed(t, id, "DISBURSED", `₹${s.loan_amount.toLocaleString("en-IN")} disbursed`); continue; }
     await simulateLender(t, appId, "payout", uid);
-    coDisbursed += 0;
   }
 
   /* 500-row demo bulk batch — processed end-to-end (validated → deduped → pipeline) */
@@ -893,42 +893,36 @@ async function seedCommandCenter(tenantId: number, rng: GnRng, userIds: number[]
     await run("INSERT INTO gn_bulk_rows (tenant_id, batch_id, row_no, raw, mapped, status) VALUES (?, ?, ?, ?, ?, 'pending')", [t, bid, r.row_no, JSON.stringify(r), JSON.stringify(r)]);
   }
   await run("UPDATE gn_bulk_batches SET total_rows = ? WHERE id = ?", [rows.length, bid]);
-  for (const row of await q<Record<string, any>>("SELECT * FROM gn_bulk_rows WHERE batch_id = ?", [bid])) {
-    const mapped = JSON.parse(row.mapped);
-    const { errors, missing } = validateRow(mapped);
-    await run("UPDATE gn_bulk_rows SET validation = ?, status = ?, error = ? WHERE id = ?",
-      [JSON.stringify(errors), errors.length === 0 ? "valid" : missing ? "missing" : "invalid", errors.length ? errors.map((e) => e.error).join("; ") : null, row.id]);
-    if (errors.length) {
-      await run("INSERT INTO gn_bulk_errors (tenant_id, batch_id, row_id, category, message, recommendation) VALUES (?, ?, ?, 'invalid_data', ?, ?)",
-        [t, bid, row.id, `Row ${row.row_no}: ${errors.map((e) => e.error).join("; ")}`, "Correct the highlighted fields in the batch detail page"]);
-    }
-  }
+
   const seenM = new Map<string, number>();
   const seenP = new Map<string, number>();
   let dupN = 0;
-  for (const row of await q<Record<string, any>>("SELECT * FROM gn_bulk_rows WHERE batch_id = ? AND status = 'valid' ORDER BY row_no", [bid])) {
-    const mapped = JSON.parse(row.mapped);
-    const mobile = normMobile(mapped.mobile);
-    const pan = mapped.pan ? String(mapped.pan).toUpperCase() : null;
-    const inBatch = mobile && seenM.has(mobile) ? `Row ${seenM.get(mobile)} has the same mobile ${mobile}` : pan && seenP.has(pan) ? `Row ${seenP.get(pan)} has the same PAN ${pan}` : null;
-    if (inBatch) {
-      dupN++;
-      await run("UPDATE gn_bulk_rows SET status = 'duplicate', error = ? WHERE id = ?", [inBatch, row.id]);
-      await run("INSERT INTO gn_bulk_errors (tenant_id, batch_id, row_id, category, message, recommendation) VALUES (?, ?, ?, 'duplicate', ?, ?)",
-        [t, bid, row.id, `Row ${row.row_no}: ${inBatch}`, "Create a new application for this existing customer instead"]);
-      continue;
-    }
-    if (mobile) seenM.set(mobile, row.row_no);
-    if (pan) seenP.set(pan, row.row_no);
+  for (const r of rows) {
+    const mobile = String(r.mobile ?? "").replace(/\D/g, "");
+    const pan = String(r.pan ?? "").trim().toUpperCase();
+    const isDup = (mobile && seenM.has(mobile)) || (pan && seenP.has(pan));
+    const isMissing = !r.name || !mobile || mobile.length < 10;
+    const isInvalid = !!pan && !/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(pan);
+    let status = "valid";
+    let err: string | null = null;
+    if (isMissing) { status = "missing"; err = "Missing mandatory name/mobile"; }
+    else if (isDup) { status = "duplicate"; err = "Duplicate mobile/PAN in file"; dupN++; }
+    else if (isInvalid) { status = "invalid"; err = "Invalid PAN format"; }
+    await run("UPDATE gn_bulk_rows SET status = ?, error = ? WHERE batch_id = ? AND row_no = ?", [status, err, bid, r.row_no]);
+    if (mobile) seenM.set(mobile, r.row_no);
+    if (pan) seenP.set(pan, r.row_no);
   }
-  const counts = await q1<Record<string, any>>(
+  const counts = await q1<{valid: number, invalid: number, missing: number, duplicates: number}>(
     `SELECT SUM(CASE WHEN status = 'valid' THEN 1 ELSE 0 END) AS valid, SUM(CASE WHEN status = 'invalid' THEN 1 ELSE 0 END) AS invalid,
        SUM(CASE WHEN status = 'missing' THEN 1 ELSE 0 END) AS missing, SUM(CASE WHEN status = 'duplicate' THEN 1 ELSE 0 END) AS duplicates
-     FROM gn_bulk_rows WHERE batch_id = ?`, [bid])!;
+     FROM gn_bulk_rows WHERE batch_id = ?`, [bid]);
+  const cValid = counts?.valid ?? 0;
+  const cInvalid = counts?.invalid ?? 0;
+  const cMissing = counts?.missing ?? 0;
   await run("UPDATE gn_bulk_batches SET status = 'validated', valid = ?, invalid = ?, missing = ?, duplicates = ? WHERE id = ?",
-    [counts.valid ?? 0, counts.invalid ?? 0, counts.missing ?? 0, dupN, bid]);
+    [cValid, cInvalid, cMissing, dupN, bid]);
   const bulk = await processBulkBatch(t, bid, uid);
-  console.log(`[GN CO SEED] applicants=${coCount} disbursed=${inr(coDisbursed)} bulk_batch=${bid} rows=${rows.length} valid=${counts.valid} dup=${dupN} invalid=${counts.invalid} processed=${bulk.created} disbursed=${bulk.disbursed} amt=${inr((await q1<Record<string, any>>("SELECT disbursed_amount FROM gn_bulk_batches WHERE id = ?", [bid]) ?? { disbursed_amount: 0 }).disbursed_amount ?? 0)}`);
+  console.log(`[GN CO SEED] applicants=${coCount} disbursed=${inr(coDisbursed)} bulk_batch=${bid} rows=${rows.length} valid=${cValid} dup=${dupN} invalid=${cInvalid} processed=${bulk.created} disbursed=${bulk.disbursed} amt=${inr((await q1<Record<string, any>>("SELECT disbursed_amount FROM gn_bulk_batches WHERE id = ?", [bid]) ?? { disbursed_amount: 0 }).disbursed_amount ?? 0)}`);
 }
 
 async function aplEventSeed(tenantId: number, applicantId: number, event: string, note: string) {

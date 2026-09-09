@@ -339,8 +339,11 @@ gnRouter.get("/gn/campaigns", requirePerm("gn.marketing.view"), asyncH(async (re
   const rows = await q<Record<string, any>>("SELECT * FROM gn_campaigns WHERE tenant_id = ? ORDER BY id DESC", [T(req)]);
   const totals = await q1<Record<string, any>>(
     `SELECT COALESCE(SUM(spend), 0) AS spend, COALESCE(SUM(leads), 0) AS leads, COALESCE(SUM(applications), 0) AS applications,
-       COALESCE(SUM(disbursed_amount), 0) AS disbursed FROM gn_campaigns WHERE tenant_id = ?`, [T(req)])!;
-  res.json({ rows, totals: { ...totals, cpl: totals.leads > 0 ? Math.round(totals.spend / totals.leads) : 0, roi: totals.spend > 0 ? Math.round((totals.disbursed / totals.spend) * 100) / 100 : 0 } });
+       COALESCE(SUM(disbursed_amount), 0) AS disbursed FROM gn_campaigns WHERE tenant_id = ?`, [T(req)]);
+  const tSpend = totals?.spend ?? 0;
+  const tLeads = totals?.leads ?? 0;
+  const tDisb = totals?.disbursed ?? 0;
+  res.json({ rows, totals: { ...(totals || {}), cpl: tLeads > 0 ? Math.round(tSpend / tLeads) : 0, roi: tSpend > 0 ? Math.round((tDisb / tSpend) * 100) / 100 : 0 } });
 }));
 
 gnRouter.post("/gn/campaigns", requirePerm("gn.marketing.manage"), asyncH(async (req: AuthedRequest, res) => {
@@ -896,7 +899,7 @@ gnRouter.delete("/gn/trash", requirePerm("gn.trash.manage"), asyncH(async (req: 
     for (const r of rows) await run("DELETE FROM gn_trash WHERE id = ?", [r.id]);
     n = rows.length;
   } else {
-    n = (await run("DELETE FROM gn_trash WHERE tenant_id = ?", [t])).changes;
+    n = Number((await run("DELETE FROM gn_trash WHERE tenant_id = ?", [t])).changes);
   }
   await audit({ tenantId: t, userId: req.user!.id, action: "gn.trash.empty", entityType: "gn_trash", entityId: 0, after: { purged: n }, ip: clientIp(req) });
   res.json({ ok: true, purged: n });

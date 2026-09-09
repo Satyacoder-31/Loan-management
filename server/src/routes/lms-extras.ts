@@ -112,13 +112,15 @@ lmsExtrasRouter.get("/loans/:id/topup", requirePerm("loans.view"), asyncH(async 
   const failed = checks.filter((c) => !c.passed);
   const eligible = failed.length === 0;
   const outstanding = loan.outstanding ?? 0;
-  const maxTopup = Math.max(0, Math.min(product.max_amount - outstanding, Math.round((loan.principal * 0.5) / 5000) * 5000));
-  const emi = computeEmi(maxTopup || loan.emi, loan.rate, Math.min(product.max_tenure, 36));
+  const maxAmount = product?.max_amount ?? 500000;
+  const maxTenure = product?.max_tenure ?? 36;
+  const maxTopup = Math.max(0, Math.min(maxAmount - outstanding, Math.round((loan.principal * 0.5) / 5000) * 5000));
+  const emi = computeEmi(maxTopup || loan.emi, loan.rate, Math.min(maxTenure, 36));
   res.json({
     eligible,
     reasons: failed.map((c) => `${c.label}: ${c.value}`),
     checks,
-    offer: eligible ? { amount: maxTopup, tenure: Math.min(product.max_tenure, 36), rate: loan.rate, emi } : null,
+    offer: eligible ? { amount: maxTopup, tenure: Math.min(maxTenure, 36), rate: loan.rate, emi } : null,
     outstanding, months_serviced: monthsServiced
   });
 }));
@@ -159,11 +161,12 @@ lmsExtrasRouter.get("/loans/:id/foreclosure-statement", requirePerm("loans.view"
   if (!loan) { res.status(404).json({ error: "Loan not found" }); return; }
   await refreshLoanState(loan.id);
   const insts = await q<Record<string, any>>("SELECT * FROM installments WHERE loan_id = ? ORDER BY seq", [loan.id]);
-  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id])!;
+  const product = await q1<Record<string, any>>("SELECT * FROM products WHERE id = ?", [loan.product_id]);
+  const forePct = product?.foreclosure_charge_pct || 3;
   const quote = foreclosureQuote(
     { principal: loan.principal, rate: loan.rate, outstanding: loan.outstanding, penalDue: loan.penal_due, feesDue: loan.fees_due },
     insts.map((i) => ({ seq: i.seq, dueDate: i.due_date, principal: i.principal, interest: i.interest, paid: i.paid, paidAmount: i.paid_amount })),
-    today(), { foreclosureChargePct: product.foreclosure_charge_pct || 3 }
+    today(), { foreclosureChargePct: forePct }
   );
   const statement = [
     `FORECLOSURE / PREPAYMENT STATEMENT — ${loan.loan_no}`,
@@ -171,7 +174,7 @@ lmsExtrasRouter.get("/loans/:id/foreclosure-statement", requirePerm("loans.view"
     `Principal outstanding: ${inrShort(quote.principalOutstanding)}`,
     `Accrued interest (to date): ${inrShort(quote.accruedInterest)}`,
     `Penal / other dues: ${inrShort(quote.penalDue + quote.feesDue)}`,
-    `Foreclosure charge (${product.foreclosure_charge_pct || 3}%): ${inrShort(quote.foreclosureCharge)}`,
+    `Foreclosure charge (${forePct}%): ${inrShort(quote.foreclosureCharge)}`,
     `Rebate: ${inrShort(quote.rebate)}`,
     `Final payable: ${inrShort(quote.finalPayable)}`,
     `Validity: 15 days from ${today()}. This is a demo statement.`

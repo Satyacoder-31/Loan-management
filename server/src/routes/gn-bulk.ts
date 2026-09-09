@@ -621,8 +621,8 @@ gnBulkRouter.post("/gn/bulk/demo", requirePerm("gn.bulk.create"), asyncH(async (
        SUM(CASE WHEN status = 'duplicate' THEN 1 ELSE 0 END) AS duplicates
      FROM gn_bulk_rows WHERE batch_id = ?`, [id])!;
   await run("UPDATE gn_bulk_batches SET status = 'validated', valid = ?, invalid = ?, missing = ?, duplicates = ? WHERE id = ?",
-    [counts.valid ?? 0, counts.invalid ?? 0, counts.missing ?? 0, dupN, id]);
+    [counts?.valid ?? 0, counts?.invalid ?? 0, counts?.missing ?? 0, dupN, id]);
   const out = await processBulkBatch(t, id, req.user!.id);
   await audit({ tenantId: t, userId: req.user!.id, action: "gn.bulk.demo", entityType: "gn_bulk_batch", entityId: id, after: { rows: rows.length, ...out }, ip: clientIp(req) });
-  res.json({ batchId: id, rows: rows.length, ...counts, processing: out });
+  res.json({ batchId: id, rows: rows.length, ...(counts || {}), processing: out });
 }));

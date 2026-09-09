@@ -125,7 +125,7 @@ export async function seed() {
   console.log("[NEXUS SEED] building large connected demo dataset (2,000 customers / 750 applications / 500 loans)…");
   const started = Date.now();
 
-  await tx(async () => {
+  const seedFn = async () => {
     /* --- tenant + 30 branches --- */
     const tenantId = (await run("INSERT INTO tenants (code, name, branding) VALUES ('NEXUS-DEMO', ?, ?)",
       ["Nexus Demo Finance Pvt Ltd", JSON.stringify({ primary: "#4f46e5", logo: null, demo: true })])).lastId;
@@ -730,7 +730,8 @@ export async function seed() {
     await seedGrowthNations(tenantId, rng, customerRows, userIds);
 
     console.log(`[NEXUS SEED] done in ${((Date.now() - started) / 1000).toFixed(1)}s — tenant=${tenantId} customers=${customerRows.length} leads=1500 applications=${appSeqState.n} loans=${loanIds.length} installments=${installmentCount} payments=${paymentCount} collection_activities=${collectionCount} branches=30 users=${userIds.length} products=${productIds.length}`);
-  });
+  };
+  await seedFn();
 }
 
 export async function seedIfEmpty() {

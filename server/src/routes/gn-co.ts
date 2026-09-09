@@ -215,7 +215,7 @@ gnCoRouter.post("/gn/co/applicants/:id/credit", requirePerm("gn.co.edit"), async
   const a = await getApplicant(t, req.params.id);
   if (a.consent_status !== "received") { res.status(400).json({ error: "Consent required before fetching credit profile" }); return; }
   const profile = await runCredit(t, a.id, req.user!.id);
-  await audit({ tenantId: t, userId: req.user!.id, action: "gn.co.credit", entityType: "gn_applicant", entityId: a.id, after: { score: profile.score, demo: true }, ip: clientIp(req) });
+  await audit({ tenantId: t, userId: req.user!.id, action: "gn.co.credit", entityType: "gn_applicant", entityId: a.id, after: { score: profile?.score, demo: true }, ip: clientIp(req) });
   res.json({ ok: true, profile });
 }));
 

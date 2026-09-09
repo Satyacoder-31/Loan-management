@@ -109,8 +109,8 @@ losExtrasRouter.get("/applications/:id/memo", requirePerm("underwriting.*"), asy
     memo = await q1("SELECT * FROM credit_memos WHERE id = ?", [id]);
     await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: "credit_memo.generate", entityType: "application", entityId: app.id, after: { memo_id: id }, ip: clientIp(req) });
   }
-  const memoRow = await q1<Record<string, any>>("SELECT * FROM credit_memos WHERE id = ?", [memo!.id])!;
-  res.json({ memo: { ...memoRow, content: JSON.parse(memoRow.content) } });
+  const memoRow = await q1<Record<string, any>>("SELECT * FROM credit_memos WHERE id = ?", [memo!.id]);
+  res.json({ memo: memoRow ? { ...memoRow, content: JSON.parse(memoRow.content || "{}") } : null });
 }));
 
 losExtrasRouter.patch("/applications/:id/memo", requirePerm("underwriting.*"), asyncH(async (req: AuthedRequest, res) => {

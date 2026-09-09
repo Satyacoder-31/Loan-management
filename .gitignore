@@ -7,3 +7,8 @@ server/data/
 *.log
 .DS_Store
 .vercel/
+.env
+*.db
+supabase/.temp/
+tmp_chunk.sql
+

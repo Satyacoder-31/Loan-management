@@ -35,7 +35,8 @@ gnApiRouter.get("/gn/api/providers", requirePerm("gn.api.view"), asyncH(async (r
         "INSERT INTO gn_api_providers (tenant_id, category, name, status, env, endpoint) VALUES (?, ?, ?, ?, 'demo', ?)",
         [t, c.category, `Demo ${c.label} Provider`, c.defaultStatus, `https://api.demo-provider.in/${c.category}`]
       )).lastId;
-      rows.push(await q1("SELECT * FROM gn_api_providers WHERE id = ?", [id])!);
+      const pRow = await q1<Record<string, any>>("SELECT * FROM gn_api_providers WHERE id = ?", [id]);
+      if (pRow) rows.push(pRow);
     }
   }
   res.json(rows);

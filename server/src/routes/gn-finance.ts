@@ -202,8 +202,8 @@ gnFinanceRouter.get("/gn/finance/accounting", requirePerm("gn.finance.view"), as
   const receivable = await q1<{ gross: number }>("SELECT COALESCE(SUM(gross), 0) AS gross FROM gn_commissions WHERE tenant_id = ? AND status = 'earned'", [t])!;
   const byCategory = await q<Record<string, any>>("SELECT category, COALESCE(SUM(amount), 0) AS amount FROM gn_expenses WHERE tenant_id = ? GROUP BY category", [t]);
   res.json({
-    income: income.gross, incomeReceived: income.received, receivable: receivable.gross,
-    expenses: expenses.amount, expensesPaid: expenses.paid, paidOut: paidOut.net,
-    netProfit: income.received - expenses.amount - paidOut.net, byCategory
+    income: income?.gross ?? 0, incomeReceived: income?.received ?? 0, receivable: receivable?.gross ?? 0,
+    expenses: expenses?.amount ?? 0, expensesPaid: expenses?.paid ?? 0, paidOut: paidOut?.net ?? 0,
+    netProfit: (income?.received ?? 0) - (expenses?.amount ?? 0) - (paidOut?.net ?? 0), byCategory
   });
 }));
