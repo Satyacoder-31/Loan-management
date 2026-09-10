@@ -3,10 +3,11 @@
 This document describes how the SNIPER Integration Hub connects to real
 provider APIs through a single **Digitap** account, with integration/compliance
 records persisted to a **Supabase** project while the CRM core stays on its own
-Postgres. It reflects what is **verified live**, what is **awaiting
+Postgres (or SQLite in local dev). It reflects what is **verified live** (each
+claim backed by a probe in `digitap-enablement-report.md`), what is **awaiting
 enablement**, and exactly what must happen for each remaining adapter to go
-live. Nothing in this file is fabricated: an adapter is marked Connected only
-after a passing provider probe.
+live. Nothing here is fabricated: an adapter shows Connected only after a
+passing live probe.
 
 ---
 
@@ -15,7 +16,7 @@ after a passing provider probe.
 ```
 Browser (React)  ──►  SNIPER API (Express, server/.env holds secrets)
                           │
-                          ├── CRM core data ──► primary Postgres (DATABASE_URL)
+                          ├── CRM core data ──► primary DB (DATABASE_URL; SQLite fallback in dev)
                           │
                           ├── adapter layer (server/src/adapters)
                           │      registry → driver (digitap | mock | pending)
@@ -27,190 +28,124 @@ Browser (React)  ──►  SNIPER API (Express, server/.env holds secrets)
                           └── provider store (server/src/db/supabase.ts) ──► Supabase
                                  integration_state · provider_requests ·
                                  consent_records · verification_results · credit_pulls
-                                 (RLS on, service-role only — see §6)
 ```
 
 Digitap APIs are called **only** from the SNIPER backend. No Digitap
 credential, Supabase service key, raw provider response or unmasked Aadhaar
 value is ever sent to the browser.
 
-## 2. Live status (as of this build)
+## 2. Credentials & environment (verified 2026-09-10)
 
-| # | Hub adapter | Category | Driver | State |
-|---|---|---|---|---|
-| 1 | PAN Verification | Identity | Digitap PAN Basic V1/V2 | 🔌 **Wired & Test-ready** — supplied pair returns 401 on UAT valid-format probe; confirm the correct UAT pair/enablement with Digitap, then click Test |
-| 2 | CKYC | Identity | pending | ⏳ Awaiting Digitap doc + enablement |
-| 3 | Aadhaar / OVD | Identity | pending | ⏳ Doc held, client returns 401 — enable |
-| 4–7 | CIBIL / Experian / Equifax / CRIF | Credit | pending | ⏳ Awaiting Credit Bureau suite |
-| 8–10 | GSTN / MCA / Udyam | Business | pending | ⏳ Awaiting business-data suite |
-| 11 | Account Aggregator | Banking | pending | ⏳ Awaiting AA (TSP/FIU) suite |
-| 12 | Bank Statement Parser | Banking | pending | ⏳ Awaiting Alternate Data (BSA) suite |
-| 13 | E-Sign Provider | Documents | pending | ⏳ Awaiting Onboarding (eSign) suite |
-| 14 | OCR Engine | Documents | pending | ⏳ Awaiting Onboarding (OCR) suite |
-| 15–20 | Payments (UPI/NACH/NEFT) + Communication (WhatsApp/SMS/Email) | — | excluded | 🚫 Out of live scope by design |
+`server/.env` holds the Sniper LLP **UAT** pair (`DIGITAP_ENV=uat`,
+`DIGITAP_UAT_CLIENT_ID=07625809`, `DIGITAP_UAT_CLIENT_SECRET=…`, git-ignored).
+The discovery probe against `svcdemo.digitap.work` returned **HTTP 200 +
+result_code 101/102/103/109** on **12 of 20** endpoints — the earlier 401
+problem is **resolved** with this pair. Keep `DIGITAP_ENV=uat` until production keys are
+issued per product. The Digitap dashboard login shown during onboarding is
+browser-only and is never stored in the repo.
 
-Every non-live adapter shows **Awaiting Digitap enablement** (or a probe error)
-in the Hub — the UI never fabricates “Connected” and no adapter goes live
-until its Test probe passes. Note: earlier session notes claimed the PAN pair
-was “verified” because an invalid-format PAN returned HTTP 400 — that 400 is
-returned pre-authentication (even with no credentials), so it proves nothing.
-Re-probed 2026-09-04 with format-valid, doc-correct payloads: **V1 → HTTP 401
-and V2 → HTTP 401 (`Client Authentication Failed`) even with DD/MM/YYYY DOB**,
-i.e. the supplied pair is not (yet) accepted on UAT for PAN Basic. This is the
-single item blocking the first live adapter. The driver also converts ISO DOB
-to Digitap's DD/MM/YYYY format, so no further code change is needed once
-Digitap confirms the correct pair.
+## 3. Held API doc — KYC Validation Suite v4.91
 
-## 3. Digitap API inventory (implemented)
+`docs/KYC-Validation-API-Suite-v4.91.pdf` (20 endpoints, all `POST`, Basic
+auth, envelope `{http_response_code, client_ref_num, request_id, result_code,
+result?, message?, error?}`, `result_code` 101 valid / 102 invalid-event /
+103 not found / 109 no ITR records for the period). All endpoints are
+implemented in `server/src/adapters/digitap.ts`.
 
-Auth for every call: `authorization: Basic base64(client_id:client_secret)` +
-`content-type: application/json`. Payloads always carry `client_ref_num`
-(≤ 45 chars). Success responses return `result_code` 101 (valid),
-102 (invalid / event), 103 (not found). **HTTP 200 = billable** — probe code
-deliberately sends an invalid PAN so a probe can never bill.
+## 4. Live status (as of this build — probe evidence in §5)
 
-### 3.1 KYC – PAN Basic Validation V1
-- UAT `POST https://svcdemo.digitap.work/validation/kyc/v1/pan_basic`
-- Prod `POST https://svc.digitap.ai/validation/kyc/v1/pan_basic`
-- Body: `client_ref_num`, `pan` (10, pattern `^[A-Z]{3}[ABCFGHLJPTE][A-Z][0-9]{4}[A-Z]$`), `name` (opt), `name_match_method` (`fuzzy` default | `exact` | `dg_name_match`)
-- Returns: `status` Active/Invalid, `name`, `pan_display_name`, `name_match`, `name_match_score`, `seeding_status`, `name_validated`
+| # | Hub adapter | Code | Digitap API | Driver | State |
+|---|---|---|---|---|---|
+| 1 | PAN Verification | `pan_verify` | `pan_basic` V1/V2 | digitap | ✅ Probe-passing (200/103) |
+| 2 | PAN Details (full profile) | `pan_details` | `pan_details` | digitap | ✅ Probe-passing (200/103) — primary KYC engine |
+| 3 | PAN Enrichment | `pan_enrichment` | `pan_to_name` / `pan_to_fname` / `pan_profile` | digitap | ✅ to_name probe-passing; fname/profile 503 at probe time (transient source) |
+| 4 | Aadhaar mapping (masked PAN) | `aadhaar_ovd` | `aadhaar_to_masked_pan` / `pan_to_masked_aadhaar` | digitap | ✅ Probe-passing (200/101, 200/102) |
+| 5 | PAN 206AB Compliance | `pan_206ab` | `form206ab_compliance_status` | digitap | ✅ Probe-passing (200/102) |
+| 6 | PAN ITR Status | `pan_itr` | `itr_basic` | digitap | ✅ Probe-passing (200/109 = no records for synthetic PAN) |
+| 7 | PAN–Aadhaar Link | `pan_aadhaar_link` | `pan_aadhaar_link` | digitap | ✅ Probe-passing (200/103) |
+| 8 | PAN–Bank Account Link | `pan_account_link` | `misc/v1/pan-account-linkage` | digitap | ⚠ 503 at probe time — retry Test; source-side |
+| 9 | Voter ID (EPIC) | `voter_verify` | `voter` | digitap | ✅ Probe-passing (200/103) |
+| 10 | Passport | `passport_verify` | `passport` | digitap | ✅ Probe-passing (200/103) |
+| 11 | Driving Licence | `dl_verify` | `dl` / `dl_plus` | digitap | ⚠ 400 with the synthetic DL — endpoint reachable; confirm accepted DL format with Digitap |
+| 12 | Unique Disability ID | `udid_verify` | `kyc_udid_verification` | digitap | ⏳ 401 — product not enabled for this client yet |
+| 13–16 | CIBIL / Experian / Equifax / CRIF | `cibil`… | Credit Bureau suite | pending | ⏳ **Credit score API doc awaited from client** + enablement |
+| 17 | CKYC | `ckyc` | CKYC suite | pending | ⏳ Needs CERSAI institution cert + key + enablement |
+| 18–20 | GSTN / MCA / Udyam | `gst`… | Business Data suite | pending | ⏳ Awaiting doc + enablement |
+| 21 | Account Aggregator | `account_aggregator` | AA (TSP/FIU) suite | pending | ⏳ Awaiting doc + enablement |
+| 22 | Bank Statement Parser | `bank_statement` | Alternate Data (BSA) suite | pending | ⏳ Awaiting doc + enablement |
+| 23 | E-Sign Provider | `esign` | Onboarding (eSign) suite | pending | ⏳ Awaiting doc + enablement |
+| 24 | OCR Engine | `ocr` | Onboarding (OCR) suite | pending | ⏳ Awaiting doc + enablement |
+| 25–30 | Payments (UPI/NACH/NEFT) + Comms (WhatsApp/SMS/Email) | — | — | excluded | 🚫 Out of live scope by design |
 
-### 3.2 KYC – PAN Basic Validation V2
-- `.../validation/kyc/v2/pan_basic` (same hosts)
-- Body: `client_ref_num`, `pan`, `name` (required), `dob` (required, `DD/MM/YYYY` zero-padded)
-- Returns: `status`, `status_code` (E = existing & valid; F/X/D/N/EA…EU event codes), `name` (Y/N), `dob` (Y/N), `seeding_status` (Y/R/NA)
+Endpoints of note: `pan_details_bc` returned **412 "PAN Status Check is not
+Enabled"** (variant not enabled; `pan_details` itself is enabled), and
+`aadhaar_to_unmasked_pan` returned **401** (unmasked-PAN recovery not enabled
+— masked variant is live). Neither is wired to a driver.
 
-SNIPER calls V2 when the customer record has a name **and** DOB, else V1 with
-fuzzy name matching.
+## 5. Enablement evidence (2026-09-10)
 
-## 4. CRM field ↔ provider field mapping
+`docs/digitap-enablement-report.md` — produced by
+`npm run test:digitap-discovery` (in `server/scripts/digitap-discovery.ts`):
+one synthetic, format-valid, non-existent payload per endpoint (e.g. PAN
+`ZZZPE0000Z`), single attempt. Verdicts: 200 + 101/102/103/109 = **enabled** ·
+401 = credentials/product · 403 = egress IP not whitelisted · 412 = product
+not enabled · 503 = source busy (retry). Re-run the script any time; it
+overwrites the report.
 
-| CRM concept | Actual provider field | Adapter/API |
-|---|---|---|
-| PAN (verified, stored) | request `pan`; response `status`/`status_code` | pan_basic V1/V2 |
-| Name match | V1 `name_match`/`name_match_score`; V2 `name` flag | pan_basic V1/V2 |
-| DOB match | V2 `dob` flag | pan_basic V2 |
-| Aadhaar seeding | V1/V2 `seeding_status` (Y/R/NA) — **no Aadhaar number returned** | pan_basic |
-| Address / email / alternate contacts | not offered by PAN Basic | — (needs PAN Details suite enablement + doc) |
-| Credit score / report | not offered by the KYC suite | — (needs Credit Bureau suite doc + enablement) |
+## 6. LOS wiring (live paths)
 
-Rule from the project brief honoured here: fields Digitap cannot return are
-shown as **Not Available**, never invented.
+- **PAN KYC** (`POST /api/applications/:id/kyc` `{type:"pan"}`): if
+  `pan_details` is live + Test-passed → PAN Details engine (name match ≥80
+  fuzzy, DOB consistency) and record `{…, live:true, sandbox:false}`;
+  else if `pan_verify` is live → PAN Basic V2 (name+DOB) / V1 fallback; else
+  the labelled sandbox path. Consent ledger row + Supabase mirror + audit on
+  every call; failures record `failed` and return 422 with a safe reason.
+- **OVD** (`{type:"voter"|"passport"|"dl"|"udid"}` + per-type fields incl.
+  optional `dob`, `aadhaar` etc.): live when the adapter's row is live +
+  Test-passed; advances the stage like PAN.
+- **Compliance/enrichment** (`{type:"206ab"|"itr"|"pan_aadhaar_link"|"aadhaar_pan"}`):
+  recorded in `kyc_records` but never auto-advance the stage. Aadhaar inputs
+  are forwarded to Digitap for the check only — never logged or persisted.
+- The workspace KYC button label resolves `pan_details` first, then
+  `pan_verify` ("Verify PAN (Digitap)" only when that adapter is Connected).
 
-## 5. Environment variables (`server/.env`, git-ignored)
+## 7. Hub API
 
-See `server/.env.example`. Key groups:
+- `GET /api/admin/integrations` — 30 rows, computed `effectiveStatus`
+  (connected | sandbox | awaiting_enablement | error | not_configured), counts,
+  env summary. Admins cannot mark Connected manually.
+- `PATCH /api/admin/integrations/:id` `{mode}` — sandbox/live switch (audited).
+- `POST /api/admin/integrations/:id/test` — per-adapter live probe via
+  `PROBE_TARGETS` (synthetic payloads); non-driver suites report awaiting
+  enablement without a network call; probe outcome persists on the row config.
+- Client: `client/src/pages/Integrations.tsx` renders from the catalog.
 
-- `DATABASE_URL`, `DATABASE_SSL` — primary CRM Postgres (auto-TLS for remote hosts).
-- `NEXUS_AUTH_SECRET` — stateless session signing secret (set strong in shared deploys).
-- `DIGITAP_ENV` (`uat`/`prod`), `DIGITAP_UAT_CLIENT_ID/SECRET`, `DIGITAP_PROD_CLIENT_ID/SECRET`.
-- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (server-only; alias `SUPABASE_SECRET_KEY` also accepted).
+## 8. Security model (unchanged)
 
-No real credentials are committed; `server/.gitignore` ignores env files but
-keeps `.env.example`.
+Consent before every provider-backed KYC call · masked PAN only in results ·
+raw Aadhaar forwarded for a check but never stored/logged/returned ·
+provider mobile/email masked (`maskMobile`/`maskEmail`) · secrets only in
+`server/.env` · retries only on network errors/5xx · fresh `client_ref_num`
+per call · Supabase writes fail open.
 
-## 6. Supabase schema (hybrid persistence)
+## 9. Testing
 
-Apply `supabase/migrations/0001_provider_hub.sql` in the Supabase project
-(SQL editor or `psql`). Tables:
+`npm run typecheck` (server + client) · `npm run test -w server`
+(`src/test/adapters.test.ts` — 11 tests incl. catalog integrity of 30
+adapters, extended identifiers, PII masking, computed statuses) ·
+`npm run test:hub` (API smoke; updated to 30 adapters) ·
+`npm run test:digitap-discovery` (live enablement evidence). Known
+pre-existing PG-dependent GN tests are unrelated and tracked separately.
 
-- `integration_state (tenant_id, code)` PK — adapter mode + effective status + last test.
-- `provider_requests` — every provider call: adapter, endpoint, refs, status, error, latency, actor.
-- `consent_records` — consent ledger mirror (purpose, version, captured_by, payload).
-- `verification_results` — normalized, **pre-masked** results with provider refs.
-- `credit_pulls` — score/band/report availability only; raw bureau reports stored only where provider/business rules allow.
+## 10. Next steps
 
-All five tables have **RLS enabled with no anon/authenticated policies** —
-reachable exclusively by the service role from the SNIPER backend. All writes
-from `server/src/db/supabase.ts` are best-effort (fail-open): if Supabase is
-down the CRM flow continues and a warning is logged.
-
-## 7. Consent, masking, RBAC, audit
-
-- Consent: every provider-backed KYC call first writes the CRM `consents`
-  ledger row and mirrors a `consent_records` entry to Supabase. No consent →
-  no provider call.
-- Masking: only masked PAN (`ABCP****4F`) and no Aadhaar value ever reach
-  `verification_results` or API responses; full PAN stays only in the internal
-  `customers` table like the rest of the CRM.
-- RBAC: integration management requires `admin.integrations` (Super/Tenant
-  admin); KYC actions require `kyc.*`; credit fetch requires `credit.fetch`.
-- Audit: every mode switch, probe, and verification is appended to
-  `audit_logs` with actor + outcome; provider requests are also logged to
-  Supabase `provider_requests`.
-- Duplicate prevention: the KYC button is disabled while a request is in
-  flight; each Digitap call carries a fresh `client_ref_num`.
-
-## 8. Error handling & retries
-
-Digitap errors map to safe CRM messages (never raw stacks):
-
-- 400 → invalid payload/format · 401/403 → provider auth failed · 102/103 →
-  invalid/not-found PAN · network/timeout (20 s, 2 attempts) → provider
-  unreachable. Retries happen only on network errors/5xx; 4xx and auth
-  failures never retry. A failed live PAN check records a `failed` KYC record
-  and returns HTTP 422 with a safe reason, and the application stage does not
-  advance on failure.
-
-## 9. Integration Hub UI / admin API
-
-- `GET /api/admin/integrations` → rows with **computed** `effectiveStatus`
-  (connected | sandbox | awaiting_enablement | error | not_configured),
-  counts, and env summary. Admins cannot mark “Connected” manually.
-- `PATCH /api/admin/integrations/:id` `{ mode: mock | live }` — switches the
-  driver mode (records an audit entry).
-- `POST /api/admin/integrations/:id/test` — PAN Basic probes Digitap UAT with
-  a format-valid, non-existent PAN (`ZZZPE0000Z`) so no real profile is
-  touched and no customer data is exposed; other adapters report their exact
-  enablement state without a network call.
-- Client: `client/src/pages/Integrations.tsx` renders statuses from probes,
-  mode switch + Test per adapter; Payments/Communication rows are disabled and
-  labelled out of scope. The LOS workspace shows “Verify PAN (Digitap)” only
-  when the PAN adapter is live and connected; otherwise the clearly-labelled
-  sandbox path runs.
-
-## 10. Testing
-
-- `npm run typecheck`, `npm run build -w client`.
-- Unit tests: `npm run test -w server` (see `src/test/adapters.test.ts` —
-  PAN/masking/dob utilities, catalog integrity, computed statuses, SQL
-  translator). Translator notes: `date('now')`→`CURRENT_DATE`,
-  `datetime('now')`→`CURRENT_TIMESTAMP`, `julianday()`→epoch-days,
-  `strftime('%Y-%m'…)`→`TO_CHAR`; schema creation is serialized with a PG
-  advisory lock so concurrent serverless cold starts are safe.
-- Run order that matches the repo: seed once (`npm run seed -w server`) then
-  run tests. Known pre-existing PG gaps in the GN module (strict `GROUP BY`,
-  etc.) are unrelated to this feature and tracked separately.
-
-## 11. Enablement checklist (your action items)
-
-To unlock each remaining adapter, ask Digitap (account/client `07625809` UAT)
-to enable the product and send its API doc — then paste the doc here and the
-adapter ships in a follow-up pass:
-
-1. **PAN Details / PAN Details Plus** — full profile (address, email, masked
-   Aadhaar, father name) used by “PAN Verification” and identity enrichment.
-2. **Aadhaar / OVD products** (KYC suite) — Aadhaar masking & OVD OCR.
-3. **CKYC** product + doc.
-4. **Credit Bureau suite** (CIBIL, Experian, Equifax, CRIF CIR) + doc.
-5. **Business-data suite** (GSTN, MCA, Udyam) + doc.
-6. **Account Aggregator (TSP/FIU)** suite + doc (Digitap is a certified AA TSP).
-7. **Alternate Data / Bank Statement Analyzer** + doc.
-8. **Onboarding suite** eSign + OCR products + doc.
-9. **Correct UAT client_id/client_secret** — re-probed 2026-09-04 with
-   doc-correct payloads: both `pan_basic` V1 and V2 return HTTP 401 `Client
-   Authentication Failed` for the supplied pair (client `07625809`); earlier
-   HTTP 400s were pre-auth payload gates and prove nothing. Ask Digitap to
-   confirm the pair (it may belong to another environment/product) and that
-   PAN Basic is enabled, then the hub Test will turn PAN Verification
-   Connected. Keep `DIGITAP_ENV=uat` until production keys are issued for each
-   product.
-
-## 12. Deployment notes
-
-- Local: set `DATABASE_URL` to a local Postgres (`DATABASE_SSL=false` if no
-  TLS), add Digitap/Supabase keys, `npm run dev`.
-- Serverless (Vercel): set every var above in the project env; schema creation
-  is advisory-lock serialized; Supabase keeps provider/compliance records that
-  would otherwise be lost on cold start.
-- Never set Digitap or Supabase secrets in `VITE_*` client variables.
+1. **Credit score API** — paste the doc; the bureau adapters (`cibil` etc.)
+   become live drivers the same way (function + mapper + probe + LOS hook).
+2. Ask Digitap for: UDID enablement (401), `aadhaar_to_unmasked_pan`
+   enablement (401), DL accepted format (400), `pan_details_bc` enablement
+   (412) — and re-probe `pan_to_fname`/`pan_profile`/`pan_account_linkage`
+   (503 at probe time).
+3. CKYC: obtain CERSAI institution cert (.pem/.pfx) + private key + financial
+   code, then Digitap enablement.
+4. Remaining suites (bureau/GST/BSA/AA/eSign/OCR): request docs + enablement
+   from your RM (client 07625809, UAT).

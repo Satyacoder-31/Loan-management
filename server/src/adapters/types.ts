@@ -44,8 +44,14 @@ export interface AdapterDef {
   needsConsent: boolean;
 }
 
-/** Adapter availability declared by Digitap for client 07625809 (UAT, probed). */
-const KYC_ENABLED = { panBasic: true, rest: false };
+/**
+ * Adapter availability. The KYC Validation Suite v4.91 doc is held in-repo
+ * (docs/KYC-Validation-API-Suite-v4.91.pdf), so every suite in that doc is
+ * mapped to a live driver; its hub Test probe decides Connected vs Error.
+ * Suites in OTHER Digitap docs (credit bureau, GST, BSA, AA, eSign, OCR, CKYC)
+ * stay `enabled: false` until their doc lands + Digitap enables them.
+ */
+const KYC_ENABLED = { panBasic: true, suiteDoc: true, rest: false };
 
 export const ADAPTER_CATALOG: AdapterDef[] = [
   // ---------- Identity ----------
@@ -55,19 +61,69 @@ export const ADAPTER_CATALOG: AdapterDef[] = [
     driver: "digitap", needsConsent: true
   },
   {
+    code: "pan_details", name: "PAN Details (full profile)", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "PAN Details / Details Plus", enabled: KYC_ENABLED.suiteDoc, note: "Doc held (KYC suite v4.91) — run Test; turns Connected on a passing probe." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "pan_enrichment", name: "PAN Enrichment (name/father/profile)", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "PAN to Name / F'Name / Profile", enabled: KYC_ENABLED.suiteDoc, note: "Doc held (KYC suite v4.91) — run Test." },
+    driver: "digitap", needsConsent: true
+  },
+  {
     code: "ckyc", name: "CKYC", category: "identity", excluded: false,
-    digitap: { family: "KYC Validation", product: "CKYC (fetch/update)", enabled: false, note: "Ask Digitap to enable CKYC and share its API doc." },
+    digitap: { family: "KYC Validation", product: "CKYC (fetch/update)", enabled: false, note: "Separate CKYC suite — needs CERSAI institution cert + key + Digitap enablement." },
     driver: "pending", needsConsent: true
   },
   {
-    code: "aadhaar_ovd", name: "Aadhaar / OVD", category: "identity", excluded: false,
-    digitap: { family: "KYC Validation", product: "Aadhaar & OVD APIs", enabled: false, note: "Doc held (KYC suite) but client returns 401 — ask Digitap to enable Aadhaar/OVD products." },
-    driver: "pending", needsConsent: true
+    code: "aadhaar_ovd", name: "Aadhaar mapping (masked PAN)", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "Aadhaar to Masked/Unmasked PAN", enabled: KYC_ENABLED.suiteDoc, note: "Doc held (KYC suite v4.91) — run Test. Raw Aadhaar never persisted." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "pan_206ab", name: "PAN 206AB Compliance", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "206AB Compliance Status", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. Higher-TDS specified-person check." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "pan_itr", name: "PAN ITR Status", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "ITR Basic (filing history)", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "pan_aadhaar_link", name: "PAN–Aadhaar Link", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "PAN Aadhaar Link Status", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. Requires customer Aadhaar (consent-gated, never stored)." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "pan_account_link", name: "PAN–Bank Account Link", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "PAN Account Linkage (misc suite)", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. PAN vs bank account ownership." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "voter_verify", name: "Voter ID (EPIC)", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "Voter ID Validation", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "passport_verify", name: "Passport", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "Passport Validation", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. Needs file number + DOB." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "dl_verify", name: "Driving Licence", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "DL / DL Plus", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. Needs DL number + DOB." },
+    driver: "digitap", needsConsent: true
+  },
+  {
+    code: "udid_verify", name: "Unique Disability ID", category: "identity", excluded: false,
+    digitap: { family: "KYC Validation", product: "UDID Verification", enabled: KYC_ENABLED.suiteDoc, note: "Doc held — run Test. UDID or linked mobile." },
+    driver: "digitap", needsConsent: true
   },
   // ---------- Credit ----------
   {
     code: "cibil", name: "TransUnion CIBIL", category: "credit", excluded: false,
-    digitap: { family: "Credit Bureau", product: "CIBIL CIR", enabled: false, note: "Ask Digitap for the Credit Bureau suite doc + enablement." },
+    digitap: { family: "Credit Bureau", product: "CIBIL CIR", enabled: false, note: "Awaiting Credit Bureau suite doc + enablement (credit score API doc pending from client)." },
     driver: "pending", needsConsent: true
   },
   {

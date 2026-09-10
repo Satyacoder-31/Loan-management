@@ -85,16 +85,18 @@ async function main() {
   // 1. State listing
   const state = await api<HubState>("/admin/integrations");
   check("GET /admin/integrations → 200", state.status === 200);
-  check("20 adapters listed", state.json.rows?.length === 20, `got ${state.json.rows?.length}`);
+  check("30 adapters listed", state.json.rows?.length === 30, `got ${state.json.rows?.length}`);
   const countKeys = ["connected", "sandbox", "error", "not_configured", "awaiting_enablement"];
   check("counts object complete", countKeys.every((k) => typeof state.json.counts?.[k] === "number"));
   const total = Object.values(state.json.counts ?? {}).reduce((a, b) => a + b, 0);
-  check("counts reconcile to 20", total === 20, `sum=${total}`);
+  check("counts reconcile to 30", total === 30, `sum=${total}`);
   check("env summary present", typeof state.json.env?.provider === "string" && typeof state.json.env?.note === "string");
   const pan = state.json.rows?.find((r) => r.code === "pan_verify");
   check("PAN Verification row present", !!pan, pan ? "" : "missing code pan_verify");
   check("PAN row driven by the digitap adapter", pan?.driver === "digitap", `driver=${pan?.driver}`);
   check("PAN row starts in mock mode", pan?.mode === "mock", `mode=${pan?.mode}`);
+  const details = state.json.rows?.find((r) => r.code === "pan_details");
+  check("PAN Details adapter present with live driver", details?.driver === "digitap", `driver=${details?.driver}`);
   const excluded = state.json.rows?.filter((r) => r.excluded);
   check("Payments/Communication adapters excluded from live scope", excluded?.length === 6, `excluded=${excluded?.length}`);
 

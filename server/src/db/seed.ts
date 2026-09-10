@@ -92,7 +92,13 @@ const PRODUCTS = [
 
 const INTEGRATIONS = [
   ["cibil", "TransUnion CIBIL", "credit"], ["experian", "Experian", "credit"], ["equifax", "Equifax", "credit"], ["crif", "CRIF High Mark", "credit"],
-  ["pan_verify", "PAN Verification", "identity"], ["ckyc", "CKYC", "identity"], ["aadhaar_ovd", "Aadhaar / OVD", "identity"],
+  ["pan_verify", "PAN Verification", "identity"], ["pan_details", "PAN Details (full profile)", "identity"],
+  ["pan_enrichment", "PAN Enrichment (name/father/profile)", "identity"], ["ckyc", "CKYC", "identity"],
+  ["aadhaar_ovd", "Aadhaar mapping (masked PAN)", "identity"], ["pan_206ab", "PAN 206AB Compliance", "identity"],
+  ["pan_itr", "PAN ITR Status", "identity"], ["pan_aadhaar_link", "PAN–Aadhaar Link", "identity"],
+  ["pan_account_link", "PAN–Bank Account Link", "identity"], ["voter_verify", "Voter ID (EPIC)", "identity"],
+  ["passport_verify", "Passport", "identity"], ["dl_verify", "Driving Licence", "identity"],
+  ["udid_verify", "Unique Disability ID", "identity"],
   ["gst", "GSTN", "business"], ["mca", "MCA", "business"], ["udyam", "Udyam", "business"],
   ["account_aggregator", "Account Aggregator", "banking"], ["bank_statement", "Bank Statement Parser", "banking"],
   ["upi", "UPI (PG)", "payments"], ["nach", "NACH / eNACH", "payments"], ["neft_imps", "NEFT / IMPS", "payments"],

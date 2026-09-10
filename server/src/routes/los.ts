@@ -6,7 +6,7 @@ import { asyncH, authRequired, clientIp, requirePerm, type AuthedRequest } from 
 import { buildApplicationContext, capacityMetrics } from "../core/ctx.js";
 import { evaluateRuleSet, type BreRule } from "../core/bre.js";
 import { buildSchedule, computeApr, computeEmi, computeDpd, inrLakh } from "../core/finance.js";
-import { CATALOG_BY_CODE, parseRowConfig, buildIntegrationView, panVerify, DigitapError, toDigitapDob, maskPan, digitapConfig } from "../adapters/index.js";
+import { CATALOG_BY_CODE, parseRowConfig, buildIntegrationView, panVerify, panDetails, ovdVerify, pan206abCompliance, panItrStatus, panAadhaarLink, panAccountLink, aadhaarToMaskedPan, DigitapError, toDigitapDob, maskPan, digitapConfig, type OvdKind } from "../adapters/index.js";
 import { saveConsentRecord, logProviderRequest, saveVerificationResult } from "../db/supabase.js";
 
 export const losRouter = Router();
@@ -128,8 +128,9 @@ losRouter.get("/applications/:id", requirePerm("applications.view"), asyncH(asyn
   const ctx = await buildApplicationContext(app.id);
   const cap = capacityMetrics(ctx);
   const activeRules = await q("SELECT * FROM bre_rules WHERE tenant_id = ? AND status = 'active' ORDER BY priority", [req.user!.tenant_id]);
-  const panInt = await q1<Record<string, any>>("SELECT * FROM integrations WHERE tenant_id = ? AND code = 'pan_verify'", [req.user!.tenant_id]);
-  const hub = { panVerify: panInt ? buildIntegrationView(panInt as any) : null };
+  const hubRows = await q<Record<string, any>>("SELECT * FROM integrations WHERE tenant_id = ? AND code IN ('pan_verify','pan_details','pan_206ab','pan_itr','pan_aadhaar_link','pan_account_link','voter_verify','passport_verify','dl_verify','udid_verify','aadhaar_ovd')", [req.user!.tenant_id]);
+  const hub: Record<string, any> = { panVerify: null };
+  for (const r of hubRows) hub[r.code] = buildIntegrationView(r as any);
   res.json({ app, stages, stageHistory, documents, bureau, bank, gst, evaluations, approvals, sanction, kfs, agreements, existingLoans, ctx: { ...ctx, capacity: cap }, rules: activeRules, hub });
 }));
 
@@ -594,7 +595,19 @@ losRouter.post("/applications/:id/disburse", requirePerm("disbursements.*"), asy
 /* ---------- KYC ---------- */
 
 losRouter.post("/applications/:id/kyc", requirePerm("kyc.*"), asyncH(async (req: AuthedRequest, res) => {
-  const body = z.object({ type: z.string(), provider: z.string().optional() }).parse(req.body);
+  const body = z.object({
+    type: z.string(),
+    provider: z.string().optional(),
+    // Optional per-type inputs (OVD + Aadhaar checks). Aadhaar is forwarded to
+    // Digitap for the requested check only — never logged or persisted.
+    epic_number: z.string().optional(),
+    file_number: z.string().optional(),
+    dl_number: z.string().optional(),
+    udid_number: z.string().optional(),
+    mobile: z.string().optional(),
+    dob: z.string().optional(),
+    aadhaar: z.string().optional()
+  }).parse(req.body);
   const app = await q1<Record<string, any>>("SELECT * FROM applications WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
   if (!app) { res.status(404).json({ error: "Application not found" }); return; }
   const cust = await q1<Record<string, any>>("SELECT * FROM customers WHERE id = ?", [app.customer_id]);
@@ -615,58 +628,188 @@ losRouter.post("/applications/:id/kyc", requirePerm("kyc.*"), asyncH(async (req:
     }
   };
 
-  /* ---------- LIVE PAN VERIFICATION (Digitap PAN Basic V1/V2) ----------
-   * Engaged only when the pan_verify integration row is set to live AND the
-   * provider call succeeds. In every other state the labelled sandbox path
-   * below runs — a mock result is never presented as a real verification. */
+  /* ---------- LIVE KYC ENGINE (Digitap KYC Validation Suite v4.91) ----------
+   * Engaged per KYC type only when that adapter's integration row is live AND
+   * its hub Test has passed (lastTestOk === true). Any other state falls
+   * through to the labelled sandbox path — a mock result is never presented
+   * as a real verification. Raw Aadhaar is forwarded to Digitap when the
+   * customer supplies it but is NEVER logged, persisted or returned. */
+  const t0 = Date.now();
+
+  /** Adapter row is live + probe-passed for this code. */
+  const liveRow = async (code: string): Promise<boolean> => {
+    const r = await q1<Record<string, any>>("SELECT * FROM integrations WHERE tenant_id = ? AND code = ?", [req.user!.tenant_id, code]);
+    if (!r) return false;
+    const cfg = parseRowConfig(r as any);
+    return cfg.mode === "live" && cfg.lastTestOk === true && CATALOG_BY_CODE.get(code)?.driver === "digitap";
+  };
+
+  const recordLive = async (type: string, ok: boolean, provider: string, ref: string, resultObj: Record<string, unknown>) => {
+    return (await run(
+      `INSERT INTO kyc_records (tenant_id, customer_id, type, status, provider, reference_id, result, consent_id, verified_by, verified_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now', '+365 days'))`,
+      [req.user!.tenant_id, app.customer_id, type, ok ? "verified" : "failed", provider, ref, JSON.stringify(resultObj), consentId, req.user!.id]
+    )).lastId as number;
+  };
+
+  const liveFailure = (e: unknown): { reason: string; errCode: string } => {
+    const httpStatus = e instanceof DigitapError ? e.httpStatus : 0;
+    const reason =
+      httpStatus === 400 ? "Payload rejected by provider — check the input format" :
+      httpStatus === 401 ? "Provider authentication failed" :
+      httpStatus === 403 ? "Provider blocked this server IP (403) — whitelist the egress IP with Digitap" :
+      httpStatus === 412 ? "Product not enabled for this Digitap client — contact your RM" :
+      httpStatus === 0 ? "Provider unreachable or timed out — try again" :
+      (e as Error).message || "Verification failed at the provider";
+    const errCode = e instanceof DigitapError && e.resultCode ? String(e.resultCode) : e instanceof DigitapError ? `HTTP${e.httpStatus}` : "NETWORK";
+    return { reason, errCode };
+  };
+
+  /* ---- PAN verification: PAN Details (rich) with PAN Basic fallback ---- */
   if (body.type === "pan" && cust.pan) {
-    const intRow = await q1<Record<string, any>>("SELECT * FROM integrations WHERE tenant_id = ? AND code = 'pan_verify'", [req.user!.tenant_id]);
-    const rowCfg = intRow ? parseRowConfig(intRow as any) : null;
-    // Live calls only fire after the hub Test proved connectivity (lastTestOk).
-    const liveMode = !!intRow && rowCfg?.mode === "live" && rowCfg.lastTestOk === true && CATALOG_BY_CODE.get("pan_verify")?.driver === "digitap";
-    if (liveMode) {
-      const t0 = Date.now();
+    const useDetails = await liveRow("pan_details");
+    const useBasic = !useDetails && (await liveRow("pan_verify"));
+    if (useDetails || useBasic) {
       const dob = toDigitapDob(cust.dob);
-      const useV2 = !!dob && !!cust.name;
-      const endpoint = useV2 ? "/validation/kyc/v2/pan_basic" : "/validation/kyc/v1/pan_basic";
+      const adapterCode = useDetails ? "pan_details" : "pan_verify";
       try {
-        const { result, providerRef } = await panVerify({
-          pan: cust.pan,
-          name: cust.name,
-          dob,
-          v2: useV2,
-          nameMatchMethod: "fuzzy"
-        });
-        const verified = result.panStatus === "Active" && result.nameMatch !== false && result.dobMatch !== false;
-        const id = (await run(
-          `INSERT INTO kyc_records (tenant_id, customer_id, type, status, provider, reference_id, result, consent_id, verified_by, verified_at, expires_at)
-           VALUES (?, ?, 'pan', ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now', '+365 days'))`,
-          [req.user!.tenant_id, app.customer_id, verified ? "verified" : "failed", `DIGITAP-PAN-BASIC-${digitapConfig().env.toUpperCase()}`,
-           providerRef, JSON.stringify({ ...result, live: true, sandbox: false }), consentId, req.user!.id]
-        )).lastId;
+        let verified: boolean;
+        let provider: string;
+        let providerRef: string;
+        let endpoint: string;
+        let resultObj: Record<string, unknown>;
+
+        if (useDetails) {
+          const d = await panDetails({
+            pan: cust.pan,
+            panDisplayName: true,
+            name: cust.name ?? null,
+            nameMatchMethod: "fuzzy"
+          });
+          provider = `DIGITAP-PAN-DETAILS-${digitapConfig().env.toUpperCase()}`;
+          providerRef = d.providerRef;
+          endpoint = d.endpoint;
+          const score = d.result.nameMatchScore;
+          const nameOk = d.result.nameMatch !== false && (score == null || score >= 80);
+          const dobOk = !dob || !d.result.dob || d.result.dob === dob;
+          verified = nameOk && dobOk;
+          resultObj = { ...d.result, live: true, sandbox: false, nameThreshold: 80, dobConsistent: dobOk };
+        } else {
+          const useV2 = !!dob && !!cust.name;
+          const b = await panVerify({ pan: cust.pan, name: cust.name, dob, v2: useV2, nameMatchMethod: "fuzzy" });
+          provider = `DIGITAP-PAN-BASIC-${digitapConfig().env.toUpperCase()}`;
+          providerRef = b.providerRef;
+          endpoint = useV2 ? "/validation/kyc/v2/pan_basic" : "/validation/kyc/v1/pan_basic";
+          verified = b.result.panStatus === "Active" && b.result.nameMatch !== false && b.result.dobMatch !== false;
+          resultObj = { ...b.result, live: true, sandbox: false };
+        }
+
+        const id = await recordLive("pan", verified, provider, providerRef, resultObj);
         if (verified) await advanceKyc();
-        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: "kyc.pan_digitap", entityType: "kyc", entityId: id, after: { verified, provider: "DIGITAP-PAN-BASIC", requestId: providerRef, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
-        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: "pan_verify", endpoint, request_ref: providerRef, provider_request_id: providerRef, status: "success", latency_ms: Date.now() - t0 });
-        await saveVerificationResult({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, adapter: "pan_verify", provider: "DIGITAP-PAN-BASIC", status: verified ? "verified" : "invalid", result: { ...result, live: true }, provider_request_id: providerRef });
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: "kyc.pan_digitap", entityType: "kyc", entityId: id, after: { verified, provider, requestId: providerRef, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: adapterCode, endpoint, request_ref: providerRef, provider_request_id: providerRef, status: "success", latency_ms: Date.now() - t0 });
+        await saveVerificationResult({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, adapter: adapterCode, provider, status: verified ? "verified" : "invalid", result: resultObj, provider_request_id: providerRef });
         res.json({ ...(await q1("SELECT * FROM kyc_records WHERE id = ?", [id])), live: true, sandbox: false });
         return;
       } catch (e) {
-        const latencyMs = Date.now() - t0;
-        const httpStatus = e instanceof DigitapError ? e.httpStatus : 0;
-        const reason =
-          httpStatus === 400 ? "PAN format rejected by provider" :
-          httpStatus === 401 ? "Provider authentication failed" :
-          httpStatus === 0 ? "Provider unreachable or timed out — try again" :
-          "PAN could not be verified (invalid/inactive PAN)";
-        const errCode = e instanceof DigitapError && e.resultCode ? String(e.resultCode) : e instanceof DigitapError ? `HTTP${e.httpStatus}` : "NETWORK";
-        const id = (await run(
-          `INSERT INTO kyc_records (tenant_id, customer_id, type, status, provider, reference_id, result, consent_id, verified_by)
-           VALUES (?, ?, 'pan', 'failed', 'DIGITAP-PAN-BASIC', ?, ?, ?, ?)`,
-          [req.user!.tenant_id, app.customer_id, `${errCode}-${Date.now()}`, JSON.stringify({ live: true, sandbox: false, panMasked: maskPan(cust.pan), error: reason }), consentId, req.user!.id]
-        )).lastId;
-        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: "kyc.pan_digitap_failed", entityType: "kyc", entityId: id, after: { reason, errCode, latencyMs }, ip: clientIp(req) });
-        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: "pan_verify", endpoint, status: "failed", error_code: errCode, latency_ms: latencyMs });
-        res.status(422).json({ error: reason, provider: "DIGITAP-PAN-BASIC", code: errCode, kycRecordId: id });
+        const { reason, errCode } = liveFailure(e);
+        const id = await recordLive("pan", false, "DIGITAP", `${errCode}-${Date.now()}`, { live: true, sandbox: false, panMasked: maskPan(cust.pan), error: reason });
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: "kyc.pan_digitap_failed", entityType: "kyc", entityId: id, after: { reason, errCode, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: adapterCode, endpoint: "digitap", status: "failed", error_code: errCode, latency_ms: Date.now() - t0 });
+        res.status(422).json({ error: reason, provider: "DIGITAP", code: errCode, kycRecordId: id });
+        return;
+      }
+    }
+  }
+
+  /* ---- OVD verifications: voter / passport / dl / udid ---- */
+  const OVD_TYPES: Record<string, { code: string; label: string }> = {
+    voter: { code: "voter_verify", label: "VOTER" },
+    passport: { code: "passport_verify", label: "PASSPORT" },
+    dl: { code: "dl_verify", label: "DL" },
+    udid: { code: "udid_verify", label: "UDID" }
+  };
+  if (OVD_TYPES[body.type]) {
+    const meta = OVD_TYPES[body.type];
+    if (await liveRow(meta.code)) {
+      try {
+        const { result, providerRef, endpoint } = await ovdVerify(body.type as OvdKind, {
+          epicNumber: body.epic_number,
+          fileNumber: body.file_number,
+          dlNumber: body.dl_number,
+          udidNumber: body.udid_number,
+          mobile: body.mobile,
+          dob: body.dob ?? cust.dob
+        });
+        const provider = `DIGITAP-${meta.label}-${digitapConfig().env.toUpperCase()}`;
+        const id = await recordLive(body.type, true, provider, providerRef, { ...result, live: true, sandbox: false });
+        await advanceKyc();
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `kyc.${body.type}_digitap`, entityType: "kyc", entityId: id, after: { provider, requestId: providerRef, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: meta.code, endpoint, request_ref: providerRef, provider_request_id: providerRef, status: "success", latency_ms: Date.now() - t0 });
+        await saveVerificationResult({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, adapter: meta.code, provider, status: "verified", result: { ...result, live: true }, provider_request_id: providerRef });
+        res.json({ ...(await q1("SELECT * FROM kyc_records WHERE id = ?", [id])), live: true, sandbox: false });
+        return;
+      } catch (e) {
+        const { reason, errCode } = liveFailure(e);
+        const id = await recordLive(body.type, false, `DIGITAP-${meta.label}`, `${errCode}-${Date.now()}`, { live: true, sandbox: false, error: reason });
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `kyc.${body.type}_digitap_failed`, entityType: "kyc", entityId: id, after: { reason, errCode, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: meta.code, endpoint: "digitap", status: "failed", error_code: errCode, latency_ms: Date.now() - t0 });
+        res.status(422).json({ error: reason, provider: `DIGITAP-${meta.label}`, code: errCode, kycRecordId: id });
+        return;
+      }
+    }
+  }
+
+  /* ---- Compliance & mapping checks (enrichment — never advance the stage) ---- */
+  const COMPLIANCE_TYPES: Record<string, { code: string; label: string }> = {
+    "206ab": { code: "pan_206ab", label: "PAN-206AB" },
+    itr: { code: "pan_itr", label: "PAN-ITR" },
+    pan_aadhaar_link: { code: "pan_aadhaar_link", label: "PAN-AADHAAR-LINK" },
+    aadhaar_pan: { code: "aadhaar_ovd", label: "AADHAAR-PAN" }
+  };
+  if (COMPLIANCE_TYPES[body.type]) {
+    const meta = COMPLIANCE_TYPES[body.type];
+    if (await liveRow(meta.code)) {
+      try {
+        let resultObj: Record<string, unknown>;
+        let providerRef: string;
+        let endpoint: string;
+        if (body.type === "206ab") {
+          const r = await pan206abCompliance(cust.pan);
+          resultObj = { ...r.result, live: true, sandbox: false };
+          providerRef = r.providerRef;
+          endpoint = "/validation/kyc/v1/form206ab_compliance_status";
+        } else if (body.type === "itr") {
+          const r = await panItrStatus(cust.pan);
+          resultObj = { filings: r.result, live: true, sandbox: false };
+          providerRef = r.providerRef;
+          endpoint = "/validation/kyc/v1/itr_basic";
+        } else if (body.type === "pan_aadhaar_link") {
+          if (!body.aadhaar) { res.status(400).json({ error: "Customer Aadhaar number is required for the PAN–Aadhaar link check (it is used for the check only and is never stored)" }); return; }
+          const r = await panAadhaarLink(cust.pan, body.aadhaar);
+          resultObj = { linked: r.linked, rawStatus: r.rawStatus, live: true, sandbox: false };
+          providerRef = r.providerRef;
+          endpoint = "/validation/kyc/v1/pan_aadhaar_link";
+        } else {
+          if (!body.aadhaar) { res.status(400).json({ error: "Customer Aadhaar number is required for the Aadhaar→PAN mapping (it is used for the check only and is never stored)" }); return; }
+          const r = await aadhaarToMaskedPan(body.aadhaar);
+          resultObj = { maskedPan: r.maskedPan, matchesCustomerPan: cust.pan ? maskPan(cust.pan) === r.maskedPan : null, live: true, sandbox: false };
+          providerRef = r.providerRef;
+          endpoint = "/validation/kyc/v1/aadhaar_to_masked_pan";
+        }
+        const provider = `DIGITAP-${meta.label}-${digitapConfig().env.toUpperCase()}`;
+        const id = await recordLive(body.type, true, provider, providerRef, resultObj);
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `kyc.${body.type}_digitap`, entityType: "kyc", entityId: id, after: { provider, requestId: providerRef, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: meta.code, endpoint, request_ref: providerRef, provider_request_id: providerRef, status: "success", latency_ms: Date.now() - t0 });
+        await saveVerificationResult({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, adapter: meta.code, provider, status: "verified", result: resultObj, provider_request_id: providerRef });
+        res.json({ ...(await q1("SELECT * FROM kyc_records WHERE id = ?", [id])), live: true, sandbox: false });
+        return;
+      } catch (e) {
+        const { reason, errCode } = liveFailure(e);
+        const id = await recordLive(body.type, false, `DIGITAP-${meta.label}`, `${errCode}-${Date.now()}`, { live: true, sandbox: false, error: reason });
+        await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `kyc.${body.type}_digitap_failed`, entityType: "kyc", entityId: id, after: { reason, errCode, latencyMs: Date.now() - t0 }, ip: clientIp(req) });
+        await logProviderRequest({ tenant_id: req.user!.tenant_id, customer_id: app.customer_id, application_id: app.id, user_id: req.user!.id, adapter: meta.code, endpoint: "digitap", status: "failed", error_code: errCode, latency_ms: Date.now() - t0 });
+        res.status(422).json({ error: reason, provider: `DIGITAP-${meta.label}`, code: errCode, kycRecordId: id });
         return;
       }
     }

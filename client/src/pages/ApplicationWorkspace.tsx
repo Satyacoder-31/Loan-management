@@ -26,7 +26,7 @@ export default function ApplicationWorkspace() {
 
   if (!data) return null;
   const { app, stages, documents, bureau, bank, gst, evaluations, ctx, rules, sanction, kfs, agreements, existingLoans, approvals, hub } = data;
-  const panHub = hub?.panVerify;
+  const panHub = hub?.pan_details ?? hub?.panVerify;
   const panLive = panHub?.mode === "live" && panHub?.effectiveStatus === "connected";
   const panLiveIntent = panHub?.mode === "live" && !panLive && panHub?.credentialsConfigured && panHub?.effectiveStatus !== "error";
 

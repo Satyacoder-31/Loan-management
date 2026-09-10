@@ -6,7 +6,7 @@ import { hashPassword, ROLES, ROLE_LABELS } from "../core/auth.js";
 import { asyncH, authRequired, clientIp, requirePerm, type AuthedRequest } from "../middleware.js";
 import { evaluateRuleSet, renderCondition, type BreRule } from "../core/bre.js";
 import { buildApplicationContext } from "../core/ctx.js";
-import { CATALOG_BY_CODE, buildIntegrationView, parseRowConfig, digitapConfig, probePanBasic as probeDigitapPanBasic } from "../adapters/index.js";
+import { CATALOG_BY_CODE, buildIntegrationView, parseRowConfig, digitapConfig, PROBE_TARGETS, LIVE_PROBE_CODES } from "../adapters/index.js";
 
 export const adminRouter = Router();
 adminRouter.use(authRequired);
@@ -232,7 +232,7 @@ env: {
 provider: "Digitap",
 digitapEnv: digitapConfig().env,
 digitapCredentials: digitapConfig().creds ? "configured" : "missing",
-note: "PAN Basic is wired and Test-ready; the supplied UAT pair returns 401 on valid-format probes — confirm the correct pair with Digitap, then click Test. Other suites go live as Digitap enables them on this client and we receive their API docs."
+note: "KYC Validation Suite v4.91 doc held in-repo — every suite in it (PAN Basic/Details, compliance, OVD) has a live driver + Test probe. Statuses compute from probes; no adapter shows Connected without a passing Test. Credit bureau / GST / BSA / AA / eSign / OCR / CKYC await their suite docs + enablement."
 }
 });
 }));
@@ -256,8 +256,9 @@ await run("UPDATE integrations SET status = ?, provider = ?, config = ? WHERE id
 await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `admin.integration_${mode}`, entityType: "integration", entityId: before.id, before, after: { mode, adapter: adapter?.name }, ip: clientIp(req) });
 res.json(buildIntegrationView({ ...before, status: "sandbox", provider, config: JSON.stringify(config) } as any));
 }));
-/** Test an adapter end-to-end. PAN Basic probes Digitap live (never billable);
- * suites Digitap has not enabled yet report exactly that, without a network call. */
+/** Test an adapter end-to-end. Adapters with a live Digitap driver probe
+ * their endpoint with a synthetic (never-billable) payload; suites Digitap
+ * has not enabled yet report exactly that, without a network call. */
 adminRouter.post("/integrations/:id/test", requirePerm("admin.integrations"), asyncH(async (req: AuthedRequest, res) => {
 const row = await q1<Record<string, any>>("SELECT * FROM integrations WHERE id = ? AND tenant_id = ?", [req.params.id, req.user!.tenant_id]);
 if (!row) { res.status(404).json({ error: "Integration not found" }); return; }
@@ -265,10 +266,10 @@ const adapter = CATALOG_BY_CODE.get(row.code);
 if (!adapter) { res.status(400).json({ error: "Unknown adapter code" }); return; }
 const t0 = Date.now();
 let outcome: { ok: boolean; message: string; detail?: string };
+const probe = LIVE_PROBE_CODES.has(row.code) ? await PROBE_TARGETS[row.code]() : null;
 if (adapter.excluded) {
 outcome = { ok: false, message: "This adapter is out of live scope (Payments / Communication excluded by design)." };
-} else if (row.code === "pan_verify") {
-const probe = await probeDigitapPanBasic();
+} else if (probe) {
 outcome = { ok: probe.ok, message: probe.message, detail: `env=${probe.auth ? digitapConfig().env.toUpperCase() : "—"} · latency ${probe.latencyMs}ms` };
 } else if (!adapter.digitap?.enabled) {
 outcome = { ok: false, message: `Awaiting Digitap enablement — ${adapter.digitap?.family ?? "unknown suite"} (${adapter.digitap?.product ?? row.code}). ${adapter.digitap?.note ?? ""}` };
@@ -276,7 +277,7 @@ outcome = { ok: false, message: `Awaiting Digitap enablement — ${adapter.digit
 outcome = { ok: false, message: "Adapter suite not yet wired to a live driver." };
 }
 const cfg = parseRowConfig(row as any);
-const config = { ...cfg, lastTest: new Date().toISOString(), lastTestOk: outcome.ok, lastTestMessage: outcome.message };
+const config = { ...cfg, lastTest: new Date().toISOString(), lastTestOk: outcome.ok, lastTestMessage: outcome.message, lastTestLatencyMs: Date.now() - t0 };
 await run("UPDATE integrations SET config = ?, status = ? WHERE id = ?",
 [JSON.stringify(config), outcome.ok ? (adapter.excluded ? row.status : "connected") : "error", row.id]);
 await audit({ tenantId: req.user!.tenant_id, userId: req.user!.id, action: `admin.integration_test`, entityType: "integration", entityId: row.id, after: { code: row.code, ok: outcome.ok, message: outcome.message }, ip: clientIp(req) });

@@ -5,13 +5,14 @@
  *   excluded rows            → "not_configured" (scope out)
  *   mock mode (row config)   → "sandbox"
  *   live mode + driver       → driver probe outcome:
- *     pan_verify             → "connected" only after a passing Digitap probe
+ *     adapters with a live Digitap driver (PROBE_TARGETS keys)
+ *                            → "connected" only after a passing probe
  *     every other adapter    → "awaiting_enablement" (Digitap suite not enabled)
  */
 
 import type { AdapterDef, AdapterMode, AdapterStatus } from "./types.js";
 import { CATALOG_BY_CODE } from "./types.js";
-import { digitapConfig, probePanBasic } from "./digitap.js";
+import { digitapConfig, PROBE_TARGETS } from "./digitap.js";
 
 export interface IntegrationRow {
   id: number;
@@ -49,13 +50,16 @@ export interface IntegrationView {
   note: string;
 }
 
-export function parseRowConfig(row: IntegrationRow): { mode?: string; environment?: string; sandbox?: boolean; demo?: boolean; lastTest?: string; lastError?: string; lastTestOk?: boolean; lastTestMessage?: string } {
+export function parseRowConfig(row: IntegrationRow): { mode?: string; environment?: string; sandbox?: boolean; demo?: boolean; lastTest?: string; lastError?: string; lastTestOk?: boolean; lastTestMessage?: string; lastTestLatencyMs?: number } {
   try {
     return row.config ? JSON.parse(row.config) : {};
   } catch {
     return {};
   }
 }
+
+/** Adapter codes with a live Digitap driver + probe. Computed truth lives here. */
+export const LIVE_PROBE_CODES = new Set(Object.keys(PROBE_TARGETS));
 
 export function effectiveStatusOf(row: IntegrationRow, adapter: AdapterDef | undefined, credentialsConfigured: boolean): AdapterStatus {
   const cfg = parseRowConfig(row);
@@ -66,22 +70,19 @@ export function effectiveStatusOf(row: IntegrationRow, adapter: AdapterDef | und
   // Live mode requested →
   if (!adapter) return "error";
   if (adapter.driver === "pending" || !adapter.digitap?.enabled) return "awaiting_enablement";
-  if (adapter.driver === "digitap") {
-    if (adapter.code === "pan_verify") {
-      // Only a PASSING live probe (persisted on the row config by the hub Test
-      // endpoint) proves "connected". A failed probe → error; creds present but
-      // unverified → awaiting_enablement (run Test); no creds → not_configured.
-      if (cfg.lastTestOk === true) return "connected";
-      if (cfg.lastTestOk === false) return "error";
-      return credentialsConfigured ? "awaiting_enablement" : "not_configured";
-    }
-    return "awaiting_enablement";
+  if (adapter.driver === "digitap" && LIVE_PROBE_CODES.has(adapter.code)) {
+    // Only a PASSING live probe (persisted on the row config by the hub Test
+    // endpoint) proves "connected". A failed probe → error; creds present but
+    // unverified → awaiting_enablement (run Test); no creds → not_configured.
+    if (cfg.lastTestOk === true) return "connected";
+    if (cfg.lastTestOk === false) return "error";
+    return credentialsConfigured ? "awaiting_enablement" : "not_configured";
   }
   return "sandbox";
 }
 
 export function adapterCredentialsConfigured(code: string): boolean {
-  if (code === "pan_verify") return !!digitapConfig().creds;
+  if (LIVE_PROBE_CODES.has(code)) return !!digitapConfig().creds;
   return false;
 }
 
@@ -94,7 +95,7 @@ export function buildIntegrationView(row: IntegrationRow): IntegrationView {
   return {
     id: row.id,
     code: row.code,
-    name: row.name,
+    name: row.code === "pan_verify" && row.name === "PAN Verification" ? row.name : (adapter?.name ?? row.name),
     category: row.category,
     status: row.status,
     provider: row.provider,

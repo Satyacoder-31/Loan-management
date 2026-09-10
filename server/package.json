@@ -11,7 +11,8 @@
     "seed": "tsx src/db/seed.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/test/*.test.ts",
-    "test:hub": "tsx scripts/hub-smoke.ts"
+    "test:hub": "tsx scripts/hub-smoke.ts",
+    "test:digitap-discovery": "tsx scripts/digitap-discovery.ts"
   },
   "dependencies": {
     "cors": "^2.8.5",
