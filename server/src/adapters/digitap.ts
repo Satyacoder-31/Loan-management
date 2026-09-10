@@ -45,6 +45,8 @@ export interface DigitapCredentials {
 }
 
 export const PAN_REGEX = /^[A-Z]{3}[ABCFGHLJPTE][A-Z][0-9]{4}[A-Z]$/;
+/** Valid PAN 4th-character holder types (CBDT scheme). */
+export const PAN_HOLDER_TYPES = "ABCFGHLJPT";
 /** Aadhaar: 12 digits (Verhoeff check is Digitap's job — we gate format only). */
 export const AADHAAR_REGEX = /^\d{12}$/;
 /** Voter ID EPIC per doc §13.3. */
@@ -93,28 +95,55 @@ export function maskEmail(e: string | null | undefined): string {
   return `${s[0]}***@${s.slice(at + 1)}`;
 }
 
-/** Normalize a DOB into Digitap's DD/MM/YYYY contract (accepts ISO + IN formats). */
+/** Normalize a DOB into Digitap's DD/MM/YYYY contract.
+ *  Accepts ISO (2019-11-1 or 2019-11-01), DD/MM/YYYY, DD-MM-YYYY and
+ *  YYYY/M/D — unpadded parts are zero-padded, which the provider requires. */
 export function toDigitapDob(dob: string | null | undefined): string | null {
   if (!dob) return null;
   const d = dob.trim();
-  const iso = d.match(/^(\d{4})-(\d{2})-(\d{2})/);
-  if (iso) return `${iso[3]}/${iso[2]}/${iso[1]}`;
-  const ddmm = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (ddmm) {
-    const dd = ddmm[1].padStart(2, "0");
-    const mm = ddmm[2].padStart(2, "0");
-    return `${dd}/${mm}/${ddmm[3]}`;
+  if (!d) return null;
+  const iso = d.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/);
+  if (iso) return `${iso[3].padStart(2, "0")}/${iso[2].padStart(2, "0")}/${iso[1]}`;
+  const ddmm = d.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/);
+  if (ddmm) return `${ddmm[1].padStart(2, "0")}/${ddmm[2].padStart(2, "0")}/${ddmm[3]}`;
+  return null;
+}
+
+/**
+ * Why a PAN fails the format contract, or null when it is well-formed.
+ * Digitap answers a malformed PAN with an opaque "One or more parameters
+ * format is wrong" (HTTP 400), so we validate locally and say what is wrong.
+ * The 4th character is the holder type — the classic sample "ABCDE1234F" has
+ * an invalid one (D) and is rejected by the provider.
+ */
+export function panFormatIssue(pan: string): string | null {
+  const p = normalizePan(pan);
+  if (!p) return "PAN number is required";
+  if (p.length !== 10) return `PAN must be exactly 10 characters — this one has ${p.length}`;
+  if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(p)) return "PAN must be 5 letters, then 4 digits, then 1 letter (e.g. ABCPE1234F)";
+  if (!PAN_HOLDER_TYPES.includes(p[3])) {
+    return `The 4th character "${p[3]}" is not a valid PAN holder type — it must be one of ${PAN_HOLDER_TYPES.split("").join("/")} ` +
+      `(P = individual). Note that "ABCDE1234F" is only a sample format, not a real PAN number.`;
   }
   return null;
+}
+
+/** Throw a LOCAL, human-readable error when the PAN cannot be valid. */
+export function assertPanFormat(pan: string): void {
+  const issue = panFormatIssue(pan);
+  if (issue) throw new DigitapError(400, issue, null, true);
 }
 
 export class DigitapError extends Error {
   httpStatus: number;
   resultCode: number | null;
-  constructor(httpStatus: number, message: string, resultCode: number | null = null) {
+  /** True when WE rejected the input locally — nothing was sent to Digitap. */
+  local: boolean;
+  constructor(httpStatus: number, message: string, resultCode: number | null = null, local = false) {
     super(message);
     this.httpStatus = httpStatus;
     this.resultCode = resultCode;
+    this.local = local;
   }
 }
 
@@ -236,7 +265,7 @@ export interface PanVerifyInput {
 export async function panVerify(input: PanVerifyInput): Promise<{ result: PanVerification; providerRef: string }> {
   const creds = await requireCreds();
   const pan = normalizePan(input.pan);
-  if (!PAN_REGEX.test(pan)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(pan);
 
   const refNum = clientRef("snpr");
   const useV2 = !!input.v2 && !!input.dob && !!input.name;
@@ -400,7 +429,7 @@ function normalizePanDetails(pan: string, r: RawPanDetails): PanDetailsResult {
 export async function panDetails(input: PanDetailsInput): Promise<{ result: PanDetailsResult; providerRef: string; endpoint: string }> {
   const creds = await requireCreds();
   const pan = normalizePan(input.pan);
-  if (!PAN_REGEX.test(pan)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(pan);
 
   const path = input.plus
     ? "/validation/kyc/v1/pan_details_plus"
@@ -437,7 +466,7 @@ export interface Compliance206abResult {
 export async function pan206abCompliance(pan: string): Promise<{ result: Compliance206abResult; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(p);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/form206ab_compliance_status", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -483,7 +512,7 @@ function normalizeItr(r: Record<string, any>[]): ItrFiling[] {
 export async function panItrStatus(pan: string): Promise<{ result: ItrFiling[]; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(p);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/itr_basic", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope);
@@ -497,7 +526,7 @@ export async function panItrStatus(pan: string): Promise<{ result: ItrFiling[]; 
 export async function panToName(pan: string): Promise<{ fullName: string; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(p);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/pan_to_name", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -507,7 +536,7 @@ export async function panToName(pan: string): Promise<{ fullName: string; provid
 export async function panToFatherName(pan: string): Promise<{ fatherName: string; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(p);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/pan_to_fname", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -521,8 +550,8 @@ export async function panToFatherName(pan: string): Promise<{ fatherName: string
 export async function panProfile(pan: string): Promise<{ result: PanDetailsResult; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
-  if (p[3] !== "P") throw new DigitapError(400, "PAN Profile is available for individual PANs only");
+  assertPanFormat(p);
+  if (p[3] !== "P") throw new DigitapError(400, "PAN Profile is available for individual PANs only", null, true);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/pan_profile", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as RawPanDetails;
@@ -544,9 +573,9 @@ export async function panAccountLink(pan: string, accountNumber: string, ifsc: s
   const p = normalizePan(pan);
   const acct = (accountNumber || "").trim();
   const ifscN = (ifsc || "").trim().toUpperCase();
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
-  if (!/^\d{9,18}$/.test(acct)) throw new DigitapError(400, "Invalid account number (9-18 digits)");
-  if (!IFSC_REGEX.test(ifscN)) throw new DigitapError(400, "Invalid IFSC code");
+  assertPanFormat(p);
+  if (!/^\d{9,18}$/.test(acct)) throw new DigitapError(400, "Invalid account number (9-18 digits)", null, true);
+  if (!IFSC_REGEX.test(ifscN)) throw new DigitapError(400, "Invalid IFSC code", null, true);
   const { envelope, httpStatus } = await post(creds, "/validation/misc/v1/pan-account-linkage", {
     client_ref_num: clientRef("snpr"), pan: p, account_number: acct, ifsc_code: ifscN
   });
@@ -589,27 +618,27 @@ export async function ovdVerify(kind: OvdKind, params: { epicNumber?: string; fi
 
   if (kind === "voter") {
     const epic = (params.epicNumber || "").trim().toUpperCase();
-    if (!EPIC_REGEX.test(epic)) throw new DigitapError(400, "Invalid Voter ID (EPIC) format");
+    if (!EPIC_REGEX.test(epic)) throw new DigitapError(400, "Invalid Voter ID (EPIC) format", null, true);
     path = "/validation/kyc/v1/voter";
     payload = { client_ref_num: clientRefNum, epic_number: epic };
   } else if (kind === "passport") {
     const file = (params.fileNumber || "").trim();
     const dob = toDigitapDob(params.dob);
-    if (!file || file.length > 30) throw new DigitapError(400, "Invalid passport file number");
-    if (!dob) throw new DigitapError(400, "DOB is required (DD/MM/YYYY)");
+    if (!file || file.length > 30) throw new DigitapError(400, "Invalid passport file number", null, true);
+    if (!dob) throw new DigitapError(400, "DOB is required (DD/MM/YYYY)", null, true);
     path = "/validation/kyc/v1/passport";
     payload = { client_ref_num: clientRefNum, file_number: file, dob };
   } else if (kind === "dl" || kind === "dl_plus") {
     const dl = (params.dlNumber || "").trim().toUpperCase();
     const dob = toDigitapDob(params.dob);
-    if (!DL_REGEX.test(dl)) throw new DigitapError(400, "Invalid driving licence number format");
-    if (!dob) throw new DigitapError(400, "DOB is required (DD/MM/YYYY)");
+    if (!DL_REGEX.test(dl)) throw new DigitapError(400, "Invalid driving licence number format", null, true);
+    if (!dob) throw new DigitapError(400, "DOB is required (DD/MM/YYYY)", null, true);
     path = kind === "dl" ? "/validation/kyc/v1/dl" : "/validation/kyc/v1/dl_plus";
     payload = { client_ref_num: clientRefNum, dl_number: dl, dob };
   } else {
     const udid = (params.udidNumber || "").trim().toUpperCase();
     const mob = (params.mobile || "").replace(/\D/g, "");
-    if (!UDID_REGEX.test(udid) && !mob) throw new DigitapError(400, "UDID (2 letters + 16 digits) or linked mobile is required");
+    if (!UDID_REGEX.test(udid) && !mob) throw new DigitapError(400, "UDID (2 letters + 16 digits) or linked mobile is required", null, true);
     const dob = toDigitapDob(params.dob);
     path = "/validation/kyc/v1/kyc_udid_verification";
     payload = { client_ref_num: clientRefNum } as Record<string, unknown>;
@@ -632,8 +661,8 @@ export async function panAadhaarLink(pan: string, aadhaar: string): Promise<{ li
   const creds = await requireCreds();
   const p = normalizePan(pan);
   const a = (aadhaar || "").trim();
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
-  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)");
+  assertPanFormat(p);
+  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)", null, true);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/pan_aadhaar_link", { client_ref_num: clientRef("snpr"), pan: p, aadhaar: a });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -646,7 +675,7 @@ export async function panAadhaarLink(pan: string, aadhaar: string): Promise<{ li
 export async function panToMaskedAadhaar(pan: string): Promise<{ maskedAadhaar: string; providerRef: string }> {
   const creds = await requireCreds();
   const p = normalizePan(pan);
-  if (!PAN_REGEX.test(p)) throw new DigitapError(400, "Invalid PAN format");
+  assertPanFormat(p);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/pan_to_masked_aadhaar", { client_ref_num: clientRef("snpr"), pan: p });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -656,7 +685,7 @@ export async function panToMaskedAadhaar(pan: string): Promise<{ maskedAadhaar: 
 export async function aadhaarToMaskedPan(aadhaar: string): Promise<{ maskedPan: string; providerRef: string }> {
   const creds = await requireCreds();
   const a = (aadhaar || "").trim();
-  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)");
+  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)", null, true);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/aadhaar_to_masked_pan", { client_ref_num: clientRef("snpr"), aadhaar: a });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;
@@ -671,7 +700,7 @@ export async function aadhaarToMaskedPan(aadhaar: string): Promise<{ maskedPan: 
 export async function aadhaarToUnmaskedPan(aadhaar: string, knownPan?: string | null): Promise<{ maskedPan: string; matchesKnownPan: boolean | null; providerRef: string }> {
   const creds = await requireCreds();
   const a = (aadhaar || "").trim();
-  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)");
+  if (!AADHAAR_REGEX.test(a)) throw new DigitapError(400, "Invalid Aadhaar format (12 digits)", null, true);
   const { envelope, httpStatus } = await post(creds, "/validation/kyc/v1/aadhaar_to_unmasked_pan", { client_ref_num: clientRef("snpr"), aadhaar: a });
   assertHttpOk(httpStatus, envelope);
   const r = assertResultOk(envelope) as Record<string, any>;

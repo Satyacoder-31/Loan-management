@@ -40,6 +40,27 @@ function sniffFile(fileName: string): { doc: string; kind: string; id: string } 
 }
 
 interface LabField { key: string; label: string; required: boolean; placeholder?: string; hint?: string }
+
+/** Valid PAN 4th-character holder types — mirrors the server + Digitap rule. */
+const PAN_HOLDER_TYPES = "ABCFGHLJPT";
+
+/** Catch locally what Digitap would reject with an opaque HTTP 400. */
+function fieldIssue(key: string, value: string, required: boolean): string | null {
+  const v = (value || "").trim();
+  if (!v) return required ? "Required" : null;
+  if (key === "pan" || key === "known_pan") {
+    const p = v.toUpperCase();
+    if (p.length !== 10) return `PAN must be exactly 10 characters — this one has ${p.length}`;
+    if (!/^[A-Z]{5}[0-9]{4}[A-Z]$/.test(p)) return "5 letters, then 4 digits, then 1 letter (e.g. ABCPE1234F)";
+    if (!PAN_HOLDER_TYPES.includes(p[3])) return `"${p[3]}" is not a valid holder type — the 4th letter must be one of ${PAN_HOLDER_TYPES.split("").join("/")}`;
+    return null;
+  }
+  if (key === "aadhaar") return /^\d{12}$/.test(v) ? null : "Aadhaar must be exactly 12 digits";
+  if (key === "ifsc") return /^[A-Za-z]{4}0\d{6}$/.test(v) ? null : "IFSC = 4 letters + 0 + 6 digits (e.g. HDFC0001234)";
+  if (key === "dob") return /^(\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2}[-/]\d{4})$/.test(v) ? null : "Use YYYY-MM-DD or DD/MM/YYYY";
+  if (key === "account_number") return /^\d{9,18}$/.test(v) ? null : "Account number must be 9–18 digits";
+  return null;
+}
 interface LabAdapter {
   code: string; name: string; docs: string[]; endpoint: string; fields: LabField[];
   digitapProduct: string | null; digitapEnabled: boolean;
@@ -61,6 +82,10 @@ interface RunResult {
   code?: string;
   details?: string[];
   status?: number;
+  /** "input" = we rejected it locally (provider never called). */
+  origin?: string;
+  hint?: string;
+  providerMessage?: string;
 }
 
 interface HistoryItem {
@@ -114,7 +139,7 @@ export default function DocLab() {
       setValues((v) => ({ ...v, [ID_FIELD[sniff.kind]]: sniff.id }));
       flash(true, `Detected ${sniff.doc} — ${sniff.kind.toUpperCase()} ${sniff.id} filled in from the filename.`);
     } else {
-      flash(false, "No ID pattern found in the filename — pick the document type and enter the number manually.");
+      flash(false, "No ID number in the filename (image content isn't read) — pick the document type and type the number in.");
     }
   };
 
@@ -141,8 +166,14 @@ export default function DocLab() {
 
   const run = async () => {
     if (!adapter) return;
-    const missing = adapter.fields.filter((f) => f.required && !(values[f.key] || "").trim());
-    if (missing.length) { flash(false, `Missing: ${missing.map((f) => f.label).join(", ")}`); return; }
+    const bad = adapter.fields
+      .map((f) => ({ f, issue: fieldIssue(f.key, values[f.key] ?? "", f.required) }))
+      .filter((x) => x.issue);
+    if (bad.length) {
+      flash(false, `${bad[0].f.label}: ${bad[0].issue}`);
+      setResult({ ok: false, origin: "input", error: `${bad[0].f.label}: ${bad[0].issue}`, hint: "Fix the highlighted field and run again — nothing was sent to Digitap." });
+      return;
+    }
     setRunning(true);
     setResult(null);
     try {
@@ -167,6 +198,9 @@ export default function DocLab() {
         code: body?.code,
         details: Array.isArray(body?.details) ? body.details : undefined,
         status: e instanceof ApiError ? e.status : undefined,
+        origin: body?.origin,
+        hint: body?.hint,
+        providerMessage: body?.providerMessage,
         latencyMs: body?.latencyMs,
         endpoint: body?.endpoint,
         provider: body?.provider
@@ -201,7 +235,8 @@ export default function DocLab() {
         <ShieldCheck size={14} className="mt-0.5 shrink-0" />
         <div>
           <b>How this works:</b> Digitap KYC products verify by <b>ID number</b>, not by image — the uploaded file is kept as the document
-          reference and the check runs on the number entered (auto-detected from the filename when possible). Every run records a consent
+          reference and the check runs on the number entered. A number can only be auto-detected from a <b>filename</b> — image content is not read yet (no OCR),
+          so for a JPG/PNG you must type the number in. Every run records a consent
           entry + audit event, and provider responses are masked (raw Aadhaar is never stored). Some Digitap products may bill on a successful
           lookup, so test with your own documents.
         </div>
@@ -284,13 +319,17 @@ export default function DocLab() {
                         {f.label} {f.required && <span className="text-rose-500">*</span>}
                       </label>
                       <input
-                        className="input mt-1"
+                        className={`input mt-1 ${fieldIssue(f.key, values[f.key] ?? "", f.required) ? "border-rose-300" : ""}`}
                         placeholder={f.placeholder ?? ""}
                         value={values[f.key] ?? ""}
-                        onChange={(e) => setVal(f.key, e.target.value)}
+                        onChange={(e) => setVal(f.key, f.key === "pan" || f.key === "known_pan" ? e.target.value.toUpperCase() : e.target.value)}
                         autoComplete="off"
                       />
-                      {f.hint && <p className="text-[10.5px] text-zinc-400 mt-0.5">{f.hint}</p>}
+                      {fieldIssue(f.key, values[f.key] ?? "", f.required) ? (
+                        <p className="text-[10.5px] text-rose-600 mt-0.5">{fieldIssue(f.key, values[f.key] ?? "", f.required)}</p>
+                      ) : f.hint ? (
+                        <p className="text-[10.5px] text-zinc-400 mt-0.5">{f.hint}</p>
+                      ) : null}
                     </div>
                   ))}
                 </div>
@@ -321,14 +360,18 @@ export default function DocLab() {
                 {result.endpoint && <div className="text-zinc-600"><b>Endpoint</b> <code className="font-mono bg-zinc-100 px-1 rounded">{result.endpoint}</code></div>}
                 {result.providerRef && <div className="text-zinc-600"><b>Request ref</b> <code className="font-mono bg-zinc-100 px-1 rounded">{result.providerRef}</code></div>}
                 {!result.ok && result.error && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">
-                    <div>{result.error}</div>
+                  <div className={`rounded-lg border px-3 py-2 ${result.origin === "input" ? "border-amber-300 bg-amber-50 text-amber-800" : "border-rose-200 bg-rose-50 text-rose-700"}`}>
+                    <div className="font-semibold">{result.origin === "input" ? "Check your input" : "Provider rejected the check"}</div>
+                    <div className="mt-0.5">{result.error}</div>
+                    {result.providerMessage && result.origin !== "input" && (
+                      <div className="mt-1 text-[11px] italic">Digitap said: “{result.providerMessage}”</div>
+                    )}
+                    {result.hint && <div className="mt-1 text-[11px]">{result.hint}</div>}
                     {result.details?.length ? (
-                      <ul className="mt-1 list-disc pl-4 text-[11px] text-rose-600">
+                      <ul className="mt-1 list-disc pl-4 text-[11px]">
                         {result.details.map((detail, i) => <li key={i}>{detail}</li>)}
                       </ul>
                     ) : null}
-                    {result.status === 400 && !result.details?.length && <div className="mt-1 text-[11px] text-rose-600">Check the required document number and select the correct document type/API.</div>}
                   </div>
                 )}
                 {result.ok && result.result && (
