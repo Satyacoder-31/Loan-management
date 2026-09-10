@@ -17,9 +17,11 @@ export function clearToken() {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  body: any;
+  constructor(status: number, message: string, body: any = null) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -34,7 +36,7 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
   });
   const json = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new ApiError(res.status, json.error || res.statusText);
+    throw new ApiError(res.status, json.error || res.statusText, json);
   }
   return json as T;
 }

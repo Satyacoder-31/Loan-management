@@ -185,8 +185,11 @@ const LAB_ADAPTERS: Record<string, LabAdapter> = {
 
 const bodySchema = z.object({
   adapter: z.string().min(1),
-  doc_type: z.string().optional(),
-  file_name: z.string().optional(),
+  // The client may intentionally send null when no file/type was selected.
+  // These are audit metadata only; the provider ID fields below remain the
+  // actual verification inputs.
+  doc_type: z.string().nullable().optional(),
+  file_name: z.string().nullable().optional(),
   pan: z.string().optional(),
   name: z.string().optional(),
   dob: z.string().optional(),

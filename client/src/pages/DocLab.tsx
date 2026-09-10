@@ -3,7 +3,7 @@ import {
   UploadCloud, FileText, Play, Loader2, CheckCircle2, XCircle, FlaskConical, ShieldCheck,
   AlertTriangle, RefreshCw
 } from "lucide-react";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { PageHeader, Card, CardTitle } from "../components/ui";
 
 const DOC_TYPES = ["PAN Card", "Voter ID (EPIC)", "Passport", "Driving Licence", "UDID Card", "Aadhaar"];
@@ -59,6 +59,8 @@ interface RunResult {
   env?: string;
   error?: string;
   code?: string;
+  details?: string[];
+  status?: number;
 }
 
 interface HistoryItem {
@@ -123,6 +125,14 @@ export default function DocLab() {
 
   const setVal = (key: string, v: string) => setValues((prev) => ({ ...prev, [key]: v }));
 
+  /** Send only populated metadata fields so older API deployments also accept the request. */
+  const buildPayload = () => {
+    const payload: Record<string, unknown> = { adapter: adapterCode, ...values };
+    if (docType) payload.doc_type = docType;
+    if (file?.name) payload.file_name = file.name;
+    return payload;
+  };
+
   const pushHistory = (item: HistoryItem) => {
     const next = [item, ...history].slice(0, 10);
     setHistory(next);
@@ -138,7 +148,7 @@ export default function DocLab() {
     try {
       const out = await api<RunResult>("/lab/test", {
         method: "POST",
-        body: { adapter: adapter.code, doc_type: docType || null, file_name: file?.name ?? null, ...values }
+        body: buildPayload()
       });
       setResult(out);
       const verified = out.result?.verified;
@@ -148,12 +158,15 @@ export default function DocLab() {
         summary: verified !== undefined ? (verified ? "verified" : "not verified") : out.ok ? "success" : (out.error || "failed")
       });
     } catch (e: any) {
-      // api() throws ApiError on non-2xx; the server sends { error, code, latencyMs } in the 422 body
-      const body = (e as any)?.body;
+      // Preserve the server's validation details instead of collapsing every
+      // 400 into the generic "Validation failed" message.
+      const body = e instanceof ApiError ? e.body : e?.body;
       const failed: RunResult = {
         ok: false,
         error: body?.error ?? e.message,
         code: body?.code,
+        details: Array.isArray(body?.details) ? body.details : undefined,
+        status: e instanceof ApiError ? e.status : undefined,
         latencyMs: body?.latencyMs,
         endpoint: body?.endpoint,
         provider: body?.provider
@@ -308,7 +321,15 @@ export default function DocLab() {
                 {result.endpoint && <div className="text-zinc-600"><b>Endpoint</b> <code className="font-mono bg-zinc-100 px-1 rounded">{result.endpoint}</code></div>}
                 {result.providerRef && <div className="text-zinc-600"><b>Request ref</b> <code className="font-mono bg-zinc-100 px-1 rounded">{result.providerRef}</code></div>}
                 {!result.ok && result.error && (
-                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">{result.error}</div>
+                  <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-rose-700">
+                    <div>{result.error}</div>
+                    {result.details?.length ? (
+                      <ul className="mt-1 list-disc pl-4 text-[11px] text-rose-600">
+                        {result.details.map((detail, i) => <li key={i}>{detail}</li>)}
+                      </ul>
+                    ) : null}
+                    {result.status === 400 && !result.details?.length && <div className="mt-1 text-[11px] text-rose-600">Check the required document number and select the correct document type/API.</div>}
+                  </div>
                 )}
                 {result.ok && result.result && (
                   <pre className="mt-2 rounded-xl bg-zinc-900 text-zinc-100 text-[11px] leading-relaxed p-4 overflow-x-auto max-h-96 overflow-y-auto">
