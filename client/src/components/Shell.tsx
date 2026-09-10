@@ -99,6 +99,7 @@ const NAV: NavGroup[] = [
     section: "Platform", items: [
       { to: "/network", label: "Network & DSA", icon: Building2 },
       { to: "/integrations", label: "Integrations", icon: Plug2 },
+      { to: "/doclab", label: "API Test Lab", icon: FileSearch },
       { to: "/admin", label: "Administration", icon: Settings2 }
     ]
   }

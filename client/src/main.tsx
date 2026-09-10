@@ -36,6 +36,7 @@ import Risk from "./pages/Risk";
 import AI from "./pages/AI";
 import Network from "./pages/Network";
 import Integrations from "./pages/Integrations";
+import DocLab from "./pages/DocLab";
 import Admin from "./pages/Admin";
 import { GnDashboard } from "./pages/gn/GnDashboard";
 import { GnApplications } from "./pages/gn/GnApplications";
@@ -123,6 +124,7 @@ function App() {
           <Route path="/ai" element={<Protected><AI /></Protected>} />
           <Route path="/network" element={<Protected><Network /></Protected>} />
           <Route path="/integrations" element={<Protected><Integrations /></Protected>} />
+          <Route path="/doclab" element={<Protected><DocLab /></Protected>} />
           <Route path="/admin" element={<Protected><Admin /></Protected>} />
           <Route path="/channel" element={<Protected><Channel /></Protected>} />
           <Route path="/gn" element={<Protected><GnDashboard /></Protected>} />

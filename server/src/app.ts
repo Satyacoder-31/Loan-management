@@ -23,6 +23,7 @@ import { gnBulkRouter } from "./routes/gn-bulk.js";
 import { gnApiRouter } from "./routes/gn-api.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { adminRouter } from "./routes/admin.js";
+import { doclabRouter } from "./routes/doclab.js";
 import { errorHandler } from "./middleware.js";
 
 /** Build the NEXUS API app. Schema creation and demo seeding run on first build. */
@@ -73,6 +74,7 @@ export async function createApp() {
   app.use("/api", gnCoRouter);
   app.use("/api", gnBulkRouter);
   app.use("/api", gnApiRouter);
+  app.use("/api", doclabRouter);
   app.use("/api/admin", adminRouter);
 
   app.use(errorHandler);

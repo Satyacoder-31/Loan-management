@@ -407,9 +407,10 @@ export async function panDetails(input: PanDetailsInput): Promise<{ result: PanD
     : input.backwardCompatible
       ? "/validation/kyc/v1/pan_details_bc"
       : "/validation/kyc/v1/pan_details";
+  // NOTE: `pan_display_name` is a RESPONSE feature (client-level enablement),
+  // never a request flag — sending it makes Digitap reject the call (412).
   const payload: Record<string, unknown> = { client_ref_num: clientRef("snpr"), pan };
   if (input.fatherName != null) payload.father_name = input.fatherName ? "true" : "false";
-  if (input.panDisplayName != null) payload.pan_display_name = input.panDisplayName ? "true" : "false";
   if (input.name) {
     payload.name = input.name;
     payload.name_match_method = input.nameMatchMethod ?? "fuzzy";
